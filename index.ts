@@ -35,8 +35,8 @@ app.get('/api/mesas', async (c) => {
         m.coord_y,
         ct.nombre_ct,
         mp.nombre_plantilla,
-        mp.num_filas,
-        mp.num_columnas
+        mp.dimension_x,
+        mp.dimension_y
       FROM mesas m
       JOIN cts ct ON m.id_ct = ct.id_ct
       JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
@@ -64,8 +64,8 @@ app.get('/api/mesas/:id', async (c) => {
         ct.nombre_ct,
         mp.nombre_plantilla,
         mp.descripcion as plantilla_descripcion,
-        mp.num_filas,
-        mp.num_columnas
+        mp.dimension_x,
+        mp.dimension_y
       FROM mesas m
       JOIN cts ct ON m.id_ct = ct.id_ct
       JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
@@ -83,6 +83,132 @@ app.get('/api/mesas/:id', async (c) => {
     return c.json({ error: 'Failed to fetch mesa' }, 500)
   }
 })
+
+// Get components for a mesa
+app.get('/api/mesas/:id/components', async (c) => {
+  const id = c.req.param('id')
+  try {
+    const query = `
+      SELECT 
+        pc.id_componente,
+        pc.tipo_elemento,
+        pc.coord_x,
+        pc.coord_y,
+        pc.descripcion_punto_montaje
+      FROM mesas m
+      JOIN plantilla_componentes pc ON m.id_plantilla = pc.id_plantilla
+      WHERE m.id_mesa = $1
+      ORDER BY pc.tipo_elemento, pc.coord_x, pc.coord_y
+    `
+    const result = await pool.query(query, [id])
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching mesa components:', error)
+    return c.json({ error: 'Failed to fetch mesa components' }, 500)
+  }
+})
+
+// Recalculate mesa dimensions based on components
+app.post('/api/recalculate-dimensions', async (c) => {
+  try {
+    // Calculate dimensions for each plantilla based on component coordinates
+    const updateQuery = `
+      UPDATE mesa_plantillas 
+      SET 
+          dimension_x = GREATEST(
+              COALESCE(
+                  CASE 
+                      WHEN componentes.num_paneles > 0 THEN
+                          -- Component coords are in mm, add 1000mm (1m) margin for panels
+                          (componentes.max_x - componentes.min_x) + 1000.0
+                      ELSE
+                          -- Add 400mm (0.4m) margin for mounting points
+                          (componentes.max_x - componentes.min_x) + 400.0
+                  END, 
+                  20000.0  -- Default 20m in mm
+              ), 
+              1000.0  -- Minimum 1m in mm
+          ),
+          dimension_y = GREATEST(
+              COALESCE(
+                  CASE 
+                      WHEN componentes.num_paneles > 0 THEN
+                          -- Component coords are in mm, add 1000mm (1m) margin for panels
+                          (componentes.max_y - componentes.min_y) + 1000.0
+                      ELSE
+                          -- Add 400mm (0.4m) margin for mounting points
+                          (componentes.max_y - componentes.min_y) + 400.0
+                  END, 
+                  6000.0   -- Default 6m in mm
+              ), 
+              1000.0   -- Minimum 1m in mm
+          )
+      FROM (
+          SELECT 
+              id_plantilla,
+              MAX(coord_x) as max_x,
+              MIN(coord_x) as min_x,
+              MAX(coord_y) as max_y,
+              MIN(coord_y) as min_y,
+              COUNT(CASE WHEN tipo_elemento = 'PANEL' THEN 1 END) as num_paneles
+          FROM plantilla_componentes
+          GROUP BY id_plantilla
+      ) as componentes
+      WHERE mesa_plantillas.id_plantilla = componentes.id_plantilla
+    `;
+    
+    const result = await pool.query(updateQuery);
+    
+    // Set default dimensions for plantillas without components
+    const defaultQuery = `
+      UPDATE mesa_plantillas 
+      SET 
+          dimension_x = 20000.0,  -- 20m in mm
+          dimension_y = 6000.0    -- 6m in mm
+      WHERE id_plantilla NOT IN (
+          SELECT DISTINCT id_plantilla 
+          FROM plantilla_componentes
+      )
+    `;
+    
+    await pool.query(defaultQuery);
+    
+    // Get summary of changes
+    const summaryQuery = `
+      SELECT 
+          mp.id_plantilla,
+          mp.nombre_plantilla,
+          ROUND((mp.dimension_x / 1000.0)::numeric, 2) as dimension_x_meters,
+          ROUND((mp.dimension_y / 1000.0)::numeric, 2) as dimension_y_meters,
+          COALESCE(comp_stats.total_componentes, 0) as total_componentes,
+          COALESCE(comp_stats.num_paneles, 0) as num_paneles,
+          COALESCE(comp_stats.num_puntos_montaje, 0) as num_puntos_montaje
+      FROM mesa_plantillas mp
+      LEFT JOIN (
+          SELECT 
+              id_plantilla,
+              COUNT(*) as total_componentes,
+              COUNT(CASE WHEN tipo_elemento = 'PANEL' THEN 1 END) as num_paneles,
+              COUNT(CASE WHEN tipo_elemento = 'PUNTO_MONTAJE' THEN 1 END) as num_puntos_montaje
+          FROM plantilla_componentes
+          GROUP BY id_plantilla
+      ) comp_stats ON mp.id_plantilla = comp_stats.id_plantilla
+      ORDER BY mp.nombre_plantilla
+    `;
+    
+    const summary = await pool.query(summaryQuery);
+    
+    return c.json({ 
+      message: 'Dimensions recalculated successfully',
+      updated_plantillas: result.rowCount,
+      plantillas: summary.rows
+    });
+    
+  } catch (error) {
+    console.error('Error recalculating dimensions:', error);
+    return c.json({ error: 'Failed to recalculate dimensions' }, 500);
+  }
+});
 
 // Start the server
 const port = process.env.PORT ? parseInt(process.env.PORT) : 8787
