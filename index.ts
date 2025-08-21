@@ -482,24 +482,90 @@ app.post('/api/recalculate-dimensions', async (c) => {
   }
 });
 
-// Create a new inspection
-app.post('/api/inspecciones', authMiddleware, async (c) => {
+// ==================== TIPOS DE ENSAYO ====================
+
+// Get all tipos de ensayo
+app.get('/api/tipos-ensayo', authMiddleware, async (c) => {
+  try {
+    const query = `
+      SELECT 
+        id_tipo_ensayo,
+        nombre_ensayo,
+        descripcion,
+        unidad_medida,
+        grupo_ensayo,
+        tipo_resultado,
+        minimo_admisible,
+        maximo_admisible
+      FROM tipos_ensayo
+      ORDER BY grupo_ensayo, nombre_ensayo
+    `
+    const result = await pool.query(query)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching tipos de ensayo:', error)
+    return c.json({ error: 'Failed to fetch tipos de ensayo' }, 500)
+  }
+})
+
+// Create tipo de ensayo
+app.post('/api/tipos-ensayo', authMiddleware, async (c) => {
   try {
     const body = await c.req.json()
-    const { id_mesa, id_componente_plantilla, id_usuario, observaciones_generales } = body
+    const { 
+      nombre_ensayo, 
+      descripcion, 
+      unidad_medida, 
+      grupo_ensayo, 
+      tipo_resultado, 
+      minimo_admisible, 
+      maximo_admisible 
+    } = body
     
-    // Validate required fields
-    if (!id_mesa || !id_componente_plantilla || !id_usuario) {
-      return c.json({ error: 'Missing required fields: id_mesa, id_componente_plantilla, id_usuario' }, 400)
+    if (!nombre_ensayo || !tipo_resultado) {
+      return c.json({ error: 'Missing required fields: nombre_ensayo, tipo_resultado' }, 400)
     }
     
     const query = `
-      INSERT INTO inspecciones (id_mesa, id_componente_plantilla, id_usuario, observaciones_generales)
-      VALUES ($1, $2, $3, $4)
-      RETURNING id_inspeccion, fecha_inspeccion, estado_general
+      INSERT INTO tipos_ensayo (
+        nombre_ensayo, descripcion, unidad_medida, grupo_ensayo, 
+        tipo_resultado, minimo_admisible, maximo_admisible
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
     `
     
-    const result = await pool.query(query, [id_mesa, id_componente_plantilla, id_usuario, observaciones_generales || null])
+    const result = await pool.query(query, [
+      nombre_ensayo, descripcion, unidad_medida, grupo_ensayo,
+      tipo_resultado, minimo_admisible, maximo_admisible
+    ])
+    
+    return c.json(result.rows[0])
+  } catch (error) {
+    console.error('Error creating tipo de ensayo:', error)
+    return c.json({ error: 'Failed to create tipo de ensayo' }, 500)
+  }
+})
+
+// ==================== INSPECCIONES ====================
+
+// Create a new inspection session
+app.post('/api/inspecciones', authMiddleware, async (c) => {
+  try {
+    const body = await c.req.json()
+    const { descripcion } = body
+    
+    // Get user ID from auth token
+    const user = c.get('user')
+    const id_usuario = 1 // Por ahora usamos un ID fijo, después podríamos extraerlo del token
+    
+    const query = `
+      INSERT INTO inspecciones (id_usuario, descripcion, estado)
+      VALUES ($1, $2, 'EN_PROCESO')
+      RETURNING *
+    `
+    
+    const result = await pool.query(query, [id_usuario, descripcion || null])
     
     return c.json({
       success: true,
@@ -512,31 +578,223 @@ app.post('/api/inspecciones', authMiddleware, async (c) => {
   }
 })
 
-// Get inspections for a mesa
-app.get('/api/mesas/:id/inspecciones', authMiddleware, async (c) => {
-  const id = c.req.param('id')
+// Update inspection status
+app.patch('/api/inspecciones/:id', authMiddleware, async (c) => {
+  try {
+    const id_inspeccion = c.req.param('id')
+    const body = await c.req.json()
+    const { estado, descripcion, fecha_fin } = body
+    
+    const query = `
+      UPDATE inspecciones 
+      SET 
+        estado = COALESCE($1, estado),
+        descripcion = COALESCE($2, descripcion),
+        fecha_fin = COALESCE($3, fecha_fin)
+      WHERE id_inspeccion = $4
+      RETURNING *
+    `
+    
+    const result = await pool.query(query, [estado, descripcion, fecha_fin, id_inspeccion])
+    
+    if (result.rows.length === 0) {
+      return c.json({ error: 'Inspection not found' }, 404)
+    }
+    
+    return c.json({
+      success: true,
+      inspeccion: result.rows[0],
+      message: 'Inspección actualizada exitosamente'
+    })
+  } catch (error) {
+    console.error('Error updating inspection:', error)
+    return c.json({ error: 'Failed to update inspection' }, 500)
+  }
+})
+
+// Delete inspection
+app.delete('/api/inspecciones/:id', authMiddleware, async (c) => {
+  try {
+    const id_inspeccion = c.req.param('id')
+    
+    const query = `
+      DELETE FROM inspecciones 
+      WHERE id_inspeccion = $1
+      RETURNING *
+    `
+    
+    const result = await pool.query(query, [id_inspeccion])
+    
+    if (result.rows.length === 0) {
+      return c.json({ error: 'Inspection not found' }, 404)
+    }
+    
+    return c.json({
+      success: true,
+      message: 'Inspección eliminada exitosamente'
+    })
+  } catch (error) {
+    console.error('Error deleting inspection:', error)
+    return c.json({ error: 'Failed to delete inspection' }, 500)
+  }
+})
+
+// Get all inspections
+app.get('/api/inspecciones', authMiddleware, async (c) => {
   try {
     const query = `
       SELECT 
-        i.id_inspeccion,
-        i.fecha_inspeccion,
-        i.estado_general,
-        i.observaciones_generales,
-        i.id_usuario,
-        pc.tipo_elemento,
-        pc.descripcion_punto_montaje,
-        pc.coord_x as componente_x,
-        pc.coord_y as componente_y
-      FROM inspecciones i
-      JOIN plantilla_componentes pc ON i.id_componente_plantilla = pc.id_componente
-      WHERE i.id_mesa = $1
-      ORDER BY i.fecha_inspeccion DESC
+        id_inspeccion,
+        id_usuario,
+        fecha_inicio,
+        fecha_fin,
+        descripcion,
+        estado
+      FROM inspecciones
+      ORDER BY fecha_inicio DESC
     `
-    const result = await pool.query(query, [id])
+    const result = await pool.query(query)
     return c.json(result.rows)
   } catch (error) {
-    console.error('Error fetching mesa inspections:', error)
-    return c.json({ error: 'Failed to fetch mesa inspections' }, 500)
+    console.error('Error fetching inspections:', error)
+    return c.json({ error: 'Failed to fetch inspections' }, 500)
+  }
+})
+
+// Delete inspection
+app.delete('/api/inspecciones/:id', authMiddleware, async (c) => {
+  try {
+    const id_inspeccion = c.req.param('id')
+    
+    const query = `
+      DELETE FROM inspecciones 
+      WHERE id_inspeccion = $1
+      RETURNING id_inspeccion
+    `
+    
+    const result = await pool.query(query, [id_inspeccion])
+    
+    if (result.rows.length === 0) {
+      return c.json({ error: 'Inspection not found' }, 404)
+    }
+    
+    return c.json({
+      success: true,
+      message: 'Inspección eliminada exitosamente'
+    })
+  } catch (error) {
+    console.error('Error deleting inspection:', error)
+    return c.json({ error: 'Failed to delete inspection' }, 500)
+  }
+})
+
+// Get all inspections (simplified for now - later filter by mesa through resultados_ensayos)
+app.get('/api/mesas/:id/inspecciones', authMiddleware, async (c) => {
+  try {
+    const query = `
+      SELECT 
+        id_inspeccion,
+        fecha_inicio,
+        fecha_fin,
+        descripcion,
+        estado,
+        id_usuario
+      FROM inspecciones
+      ORDER BY fecha_inicio DESC
+    `
+    const result = await pool.query(query)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching inspections:', error)
+    return c.json({ error: 'Failed to fetch inspections' }, 500)
+  }
+})
+
+// ==================== RESULTADOS DE ENSAYOS ====================
+
+// Create resultado de ensayo
+app.post('/api/resultados-ensayos', authMiddleware, async (c) => {
+  try {
+    const body = await c.req.json()
+    const { 
+      id_inspeccion, 
+      id_tipo_ensayo, 
+      id_mesa, 
+      id_componente_plantilla_1, 
+      id_componente_plantilla_2,
+      resultado_numerico,
+      resultado_booleano,
+      resultado_texto
+    } = body
+    
+    // Validate required fields
+    if (!id_inspeccion || !id_tipo_ensayo || !id_mesa || !id_componente_plantilla_1) {
+      return c.json({ 
+        error: 'Missing required fields: id_inspeccion, id_tipo_ensayo, id_mesa, id_componente_plantilla_1' 
+      }, 400)
+    }
+    
+    const query = `
+      INSERT INTO resultados_ensayos (
+        id_inspeccion, id_tipo_ensayo, id_mesa, 
+        id_componente_plantilla_1, id_componente_plantilla_2,
+        resultado_numerico, resultado_booleano, resultado_texto
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `
+    
+    const result = await pool.query(query, [
+      id_inspeccion, id_tipo_ensayo, id_mesa,
+      id_componente_plantilla_1, id_componente_plantilla_2,
+      resultado_numerico, resultado_booleano, resultado_texto
+    ])
+    
+    return c.json({
+      success: true,
+      resultado: result.rows[0],
+      message: 'Resultado de ensayo guardado exitosamente'
+    })
+  } catch (error) {
+    console.error('Error creating resultado ensayo:', error)
+    return c.json({ error: 'Failed to create resultado ensayo' }, 500)
+  }
+})
+
+// Get resultados for an inspection
+app.get('/api/inspecciones/:id/resultados', authMiddleware, async (c) => {
+  const id_inspeccion = c.req.param('id')
+  try {
+    const query = `
+      SELECT 
+        re.*,
+        te.nombre_ensayo,
+        te.descripcion as ensayo_descripcion,
+        te.tipo_resultado,
+        te.unidad_medida,
+        te.grupo_ensayo,
+        m.nombre_mesa,
+        pc1.tipo_elemento as componente1_tipo,
+        pc1.descripcion_punto_montaje as componente1_descripcion,
+        pc1.coord_x as componente1_x,
+        pc1.coord_y as componente1_y,
+        pc2.tipo_elemento as componente2_tipo,
+        pc2.descripcion_punto_montaje as componente2_descripcion,
+        pc2.coord_x as componente2_x,
+        pc2.coord_y as componente2_y
+      FROM resultados_ensayos re
+      JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+      JOIN mesas m ON re.id_mesa = m.id_mesa
+      JOIN plantilla_componentes pc1 ON re.id_componente_plantilla_1 = pc1.id_componente
+      LEFT JOIN plantilla_componentes pc2 ON re.id_componente_plantilla_2 = pc2.id_componente
+      WHERE re.id_inspeccion = $1
+      ORDER BY re.fecha_medicion DESC
+    `
+    const result = await pool.query(query, [id_inspeccion])
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching inspection results:', error)
+    return c.json({ error: 'Failed to fetch inspection results' }, 500)
   }
 })
 
