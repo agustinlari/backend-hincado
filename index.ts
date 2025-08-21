@@ -3,8 +3,12 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { Pool } from 'pg'
 import { serve } from '@hono/node-server'
+import { jwt, sign, verify } from 'hono/jwt'
 
 const app = new Hono()
+
+// JWT Secret
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production'
 
 // Configure CORS
 app.use('/*', cors({
@@ -24,8 +28,139 @@ const pool = new Pool({
 
 app.get('/', (c) => c.text('¡Hola desde Hono backend!'))
 
+// Auth endpoints
+app.get('/api/auth/login', (c) => {
+  const keycloakUrl = process.env.KEYCLOAK_BASE_URL || 'https://aplicaciones.osmos.es:4444'
+  const realm = process.env.KEYCLOAK_REALM || 'master'
+  const clientId = process.env.KEYCLOAK_CLIENT_ID || 'fotovoltaica-client'
+  
+  // Redirect URL should point back to our callback
+  const redirectUri = encodeURIComponent(`${c.req.url.split('/api')[0]}/api/auth/callback`)
+  
+  const loginUrl = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid profile email`
+  
+  return c.json({ loginUrl })
+})
+
+app.get('/api/auth/callback', async (c) => {
+  const code = c.req.query('code')
+  
+  if (!code) {
+    return c.json({ error: 'Authorization code not provided' }, 400)
+  }
+  
+  try {
+    const keycloakUrl = process.env.KEYCLOAK_BASE_URL || 'https://aplicaciones.osmos.es:4444'
+    const realm = process.env.KEYCLOAK_REALM || 'master'
+    const clientId = process.env.KEYCLOAK_CLIENT_ID || 'fotovoltaica-client'
+    const redirectUri = `${c.req.url.split('/api')[0]}/api/auth/callback`
+    
+    // Exchange code for tokens
+    const tokenResponse = await fetch(`${keycloakUrl}/realms/${realm}/protocol/openid-connect/token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: clientId,
+        code,
+        redirect_uri: redirectUri
+      })
+    })
+    
+    if (!tokenResponse.ok) {
+      throw new Error('Failed to exchange code for tokens')
+    }
+    
+    const tokens = await tokenResponse.json()
+    
+    // Get user info
+    const userInfoResponse = await fetch(`${keycloakUrl}/realms/${realm}/protocol/openid-connect/userinfo`, {
+      headers: {
+        'Authorization': `Bearer ${tokens.access_token}`
+      }
+    })
+    
+    if (!userInfoResponse.ok) {
+      throw new Error('Failed to get user info')
+    }
+    
+    const userInfo = await userInfoResponse.json()
+    
+    // Create our own JWT token with user info
+    const payload = {
+      sub: userInfo.sub,
+      email: userInfo.email,
+      name: userInfo.name,
+      preferred_username: userInfo.preferred_username,
+      exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
+    }
+    
+    const token = await sign(payload, JWT_SECRET)
+    
+    // Redirect to frontend with token
+    return c.redirect(`/?token=${token}`)
+    
+  } catch (error) {
+    console.error('Auth callback error:', error)
+    return c.json({ error: 'Authentication failed' }, 500)
+  }
+})
+
+app.post('/api/auth/verify', async (c) => {
+  const authHeader = c.req.header('Authorization')
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return c.json({ error: 'No token provided' }, 401)
+  }
+  
+  const token = authHeader.slice(7)
+  
+  try {
+    const payload = await verify(token, JWT_SECRET)
+    return c.json({ user: payload, valid: true })
+  } catch (error) {
+    return c.json({ error: 'Invalid token', valid: false }, 401)
+  }
+})
+
+app.post('/api/auth/logout', (c) => {
+  const keycloakUrl = process.env.KEYCLOAK_BASE_URL || 'https://aplicaciones.osmos.es:4444'
+  const realm = process.env.KEYCLOAK_REALM || 'master'
+  
+  const logoutUrl = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/logout`
+  
+  return c.json({ logoutUrl })
+})
+
+// Middleware for protected routes
+const authMiddleware = async (c: any, next: any) => {
+  // Skip auth in development mode if enabled
+  if (process.env.ENABLE_DEV_AUTH === 'true') {
+    c.set('user', { sub: '1', email: 'dev@example.com', name: 'Dev User' })
+    return next()
+  }
+  
+  const authHeader = c.req.header('Authorization')
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return c.json({ error: 'Authentication required' }, 401)
+  }
+  
+  const token = authHeader.slice(7)
+  
+  try {
+    const payload = await verify(token, JWT_SECRET)
+    c.set('user', payload)
+    return next()
+  } catch (error) {
+    return c.json({ error: 'Invalid token' }, 401)
+  }
+}
+
 // Get all mesas with their CT and plantilla info
-app.get('/api/mesas', async (c) => {
+app.get('/api/mesas', authMiddleware, async (c) => {
   try {
     const query = `
       SELECT 
@@ -52,7 +187,7 @@ app.get('/api/mesas', async (c) => {
 })
 
 // Get mesa details by ID
-app.get('/api/mesas/:id', async (c) => {
+app.get('/api/mesas/:id', authMiddleware, async (c) => {
   const id = c.req.param('id')
   try {
     const query = `
@@ -85,7 +220,7 @@ app.get('/api/mesas/:id', async (c) => {
 })
 
 // Get components for a mesa
-app.get('/api/mesas/:id/components', async (c) => {
+app.get('/api/mesas/:id/components', authMiddleware, async (c) => {
   const id = c.req.param('id')
   try {
     const query = `
@@ -211,7 +346,7 @@ app.post('/api/recalculate-dimensions', async (c) => {
 });
 
 // Create a new inspection
-app.post('/api/inspecciones', async (c) => {
+app.post('/api/inspecciones', authMiddleware, async (c) => {
   try {
     const body = await c.req.json()
     const { id_mesa, id_componente_plantilla, id_usuario, observaciones_generales } = body
@@ -241,7 +376,7 @@ app.post('/api/inspecciones', async (c) => {
 })
 
 // Get inspections for a mesa
-app.get('/api/mesas/:id/inspecciones', async (c) => {
+app.get('/api/mesas/:id/inspecciones', authMiddleware, async (c) => {
   const id = c.req.param('id')
   try {
     const query = `

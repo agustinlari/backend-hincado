@@ -9,7 +9,9 @@
     "@hono/node-server": "^1.19.0",
     "@types/pg": "^8.15.5",
     "dotenv": "^17.2.1",
+    "express-session": "^1.18.2",
     "hono": "^4.9.2",
+    "keycloak-connect": "^26.1.1",
     "pg": "^8.16.3"
   },
   "devDependencies": {
