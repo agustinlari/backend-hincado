@@ -4,6 +4,7 @@ import { cors } from 'hono/cors'
 import { Pool } from 'pg'
 import { serve } from '@hono/node-server'
 import { jwt, sign, verify } from 'hono/jwt'
+import * as jose from 'jose'
 
 const app = new Hono()
 
@@ -28,18 +29,136 @@ const pool = new Pool({
 
 app.get('/', (c) => c.text('¡Hola desde Hono backend!'))
 
+// Cache para las claves públicas de Keycloak
+let keycloakJWKS: jose.JSONWebKeySet | null = null;
+let jwksLastFetched = 0;
+const JWKS_CACHE_DURATION = 300000; // 5 minutos
+
+async function getKeycloakJWKS(): Promise<jose.JSONWebKeySet> {
+  const now = Date.now();
+  
+  if (keycloakJWKS && (now - jwksLastFetched) < JWKS_CACHE_DURATION) {
+    return keycloakJWKS;
+  }
+
+  try {
+    const keycloakUrl = process.env.KEYCLOAK_INTERNAL_URL || 'http://127.0.0.1:8080'
+    const realm = process.env.KEYCLOAK_REALM || 'master'
+    const certsUrl = `${keycloakUrl}/auth/realms/${realm}/protocol/openid-connect/certs`
+    
+    console.log('🔐 Obteniendo JWKS de:', certsUrl);
+    
+    const response = await fetch(certsUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Error obteniendo JWKS: ${response.status} ${response.statusText}`);
+    }
+    
+    keycloakJWKS = await response.json();
+    jwksLastFetched = now;
+    
+    console.log('✅ JWKS obtenido correctamente');
+    return keycloakJWKS as jose.JSONWebKeySet;
+    
+  } catch (error) {
+    console.error('❌ Error obteniendo JWKS:', error);
+    throw new Error('No se pudieron obtener las claves de Keycloak');
+  }
+}
+
+async function validateKeycloakToken(token: string): Promise<any> {
+  try {
+    console.log('🔐 Validando token...');
+    
+    const jwks = await getKeycloakJWKS();
+    const localJWKS = jose.createLocalJWKSet(jwks);
+    
+    const { payload } = await jose.jwtVerify(token, localJWKS, {
+      issuer: undefined,
+      audience: undefined,
+    });
+
+    console.log('✅ Token validado correctamente');
+    console.log('🔐 Usuario:', payload.preferred_username || payload.sub);
+    
+    return payload;
+    
+  } catch (error: any) {
+    console.error('❌ Error validando token:', error.message);
+    throw new Error('Token inválido');
+  }
+}
+
 // Auth endpoints
-app.get('/api/auth/login', (c) => {
-  const keycloakUrl = process.env.KEYCLOAK_BASE_URL || 'https://aplicaciones.osmos.es:4444'
-  const realm = process.env.KEYCLOAK_REALM || 'master'
-  const clientId = process.env.KEYCLOAK_CLIENT_ID || 'fotovoltaica-client'
-  
-  // Redirect URL should point back to our callback
-  const redirectUri = encodeURIComponent(`${c.req.url.split('/api')[0]}/api/auth/callback`)
-  
-  const loginUrl = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=openid profile email`
-  
-  return c.json({ loginUrl })
+app.post('/api/auth/login', async (c) => {
+  try {
+    const { username, password } = await c.req.json()
+    
+    if (!username || !password) {
+      return c.json({ error: 'Username and password are required' }, 400)
+    }
+
+    const keycloakUrl = process.env.KEYCLOAK_INTERNAL_URL || 'http://127.0.0.1:8080'
+    const realm = process.env.KEYCLOAK_REALM || 'master'
+    const clientId = process.env.KEYCLOAK_CLIENT_ID || 'fotovoltaica-client'
+    
+    console.log('🔐 Iniciando login para:', username);
+    console.log('🔗 URL interna:', keycloakUrl);
+    console.log('🆔 Client ID:', clientId);
+    
+    // Obtener token de Keycloak usando URL interna
+    const tokenUrl = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/token`
+    const requestBody = new URLSearchParams({
+      grant_type: 'password',
+      client_id: clientId,
+      username: username,
+      password: password,
+    })
+
+    console.log('📡 URL completa:', tokenUrl);
+
+    const response = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: requestBody,
+    });
+
+    console.log('📡 Status de respuesta:', response.status);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      console.error('❌ Error de Keycloak:', errorData);
+      return c.json({ 
+        error: errorData.error_description || 'Credenciales inválidas' 
+      }, 401);
+    }
+
+    const tokenData = await response.json();
+
+    // Validar y decodificar el token
+    const keycloakUser = await validateKeycloakToken(tokenData.access_token);
+
+    return c.json({
+      success: true,
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expires_in: tokenData.expires_in,
+      user: {
+        sub: keycloakUser.sub,
+        email: keycloakUser.email,
+        name: keycloakUser.name || keycloakUser.preferred_username,
+        preferred_username: keycloakUser.preferred_username
+      }
+    });
+
+  } catch (error: any) {
+    console.error('❌ Error completo:', error);
+    return c.json({ 
+      error: error.message || 'Error de autenticación' 
+    }, 401);
+  }
 })
 
 app.get('/api/auth/callback', async (c) => {
@@ -118,9 +237,20 @@ app.post('/api/auth/verify', async (c) => {
   const token = authHeader.slice(7)
   
   try {
-    const payload = await verify(token, JWT_SECRET)
-    return c.json({ user: payload, valid: true })
-  } catch (error) {
+    // Validar token directamente con Keycloak
+    const keycloakUser = await validateKeycloakToken(token);
+    
+    return c.json({
+      user: {
+        sub: keycloakUser.sub,
+        email: keycloakUser.email,
+        name: keycloakUser.name || keycloakUser.preferred_username,
+        preferred_username: keycloakUser.preferred_username
+      },
+      valid: true
+    })
+  } catch (error: any) {
+    console.error('Token verification failed:', error.message);
     return c.json({ error: 'Invalid token', valid: false }, 401)
   }
 })
@@ -151,10 +281,17 @@ const authMiddleware = async (c: any, next: any) => {
   const token = authHeader.slice(7)
   
   try {
-    const payload = await verify(token, JWT_SECRET)
-    c.set('user', payload)
+    // Usar validateKeycloakToken en lugar de verify interno
+    const keycloakUser = await validateKeycloakToken(token);
+    c.set('user', {
+      sub: keycloakUser.sub,
+      email: keycloakUser.email,
+      name: keycloakUser.name || keycloakUser.preferred_username,
+      preferred_username: keycloakUser.preferred_username
+    })
     return next()
-  } catch (error) {
+  } catch (error: any) {
+    console.error('Auth middleware failed:', error.message);
     return c.json({ error: 'Invalid token' }, 401)
   }
 }
