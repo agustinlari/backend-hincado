@@ -210,6 +210,64 @@ app.post('/api/recalculate-dimensions', async (c) => {
   }
 });
 
+// Create a new inspection
+app.post('/api/inspecciones', async (c) => {
+  try {
+    const body = await c.req.json()
+    const { id_mesa, id_componente_plantilla, id_usuario, observaciones_generales } = body
+    
+    // Validate required fields
+    if (!id_mesa || !id_componente_plantilla || !id_usuario) {
+      return c.json({ error: 'Missing required fields: id_mesa, id_componente_plantilla, id_usuario' }, 400)
+    }
+    
+    const query = `
+      INSERT INTO inspecciones (id_mesa, id_componente_plantilla, id_usuario, observaciones_generales)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id_inspeccion, fecha_inspeccion, estado_general
+    `
+    
+    const result = await pool.query(query, [id_mesa, id_componente_plantilla, id_usuario, observaciones_generales || null])
+    
+    return c.json({
+      success: true,
+      inspeccion: result.rows[0],
+      message: 'Inspección creada exitosamente'
+    })
+  } catch (error) {
+    console.error('Error creating inspection:', error)
+    return c.json({ error: 'Failed to create inspection' }, 500)
+  }
+})
+
+// Get inspections for a mesa
+app.get('/api/mesas/:id/inspecciones', async (c) => {
+  const id = c.req.param('id')
+  try {
+    const query = `
+      SELECT 
+        i.id_inspeccion,
+        i.fecha_inspeccion,
+        i.estado_general,
+        i.observaciones_generales,
+        i.id_usuario,
+        pc.tipo_elemento,
+        pc.descripcion_punto_montaje,
+        pc.coord_x as componente_x,
+        pc.coord_y as componente_y
+      FROM inspecciones i
+      JOIN plantilla_componentes pc ON i.id_componente_plantilla = pc.id_componente
+      WHERE i.id_mesa = $1
+      ORDER BY i.fecha_inspeccion DESC
+    `
+    const result = await pool.query(query, [id])
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching mesa inspections:', error)
+    return c.json({ error: 'Failed to fetch mesa inspections' }, 500)
+  }
+})
+
 // Start the server
 const port = process.env.PORT ? parseInt(process.env.PORT) : 8787
 
