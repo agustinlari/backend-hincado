@@ -747,6 +747,43 @@ app.post('/api/resultados-ensayos', authMiddleware, async (c) => {
   }
 })
 
+// Get latest test results for all mesas and test types
+app.get('/api/resultados-ensayos/latest', authMiddleware, async (c) => {
+  try {
+    const query = `
+      WITH latest_results AS (
+        SELECT 
+          re.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY re.id_mesa, re.id_tipo_ensayo 
+            ORDER BY re.fecha_medicion DESC, re.id_resultado DESC
+          ) as rn
+        FROM resultados_ensayos re
+      )
+      SELECT 
+        lr.id_mesa,
+        lr.id_tipo_ensayo,
+        lr.resultado_numerico,
+        lr.resultado_booleano,
+        lr.resultado_texto,
+        lr.fecha_medicion,
+        te.nombre_ensayo,
+        te.tipo_resultado,
+        te.unidad_medida
+      FROM latest_results lr
+      JOIN tipos_ensayo te ON lr.id_tipo_ensayo = te.id_tipo_ensayo
+      WHERE lr.rn = 1
+      ORDER BY lr.id_mesa, te.grupo_ensayo, te.nombre_ensayo
+    `
+    
+    const result = await pool.query(query)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching latest test results:', error)
+    return c.json({ error: 'Failed to fetch latest test results' }, 500)
+  }
+})
+
 // Get resultados for an inspection
 app.get('/api/inspecciones/:id/resultados', authMiddleware, async (c) => {
   const id_inspeccion = c.req.param('id')
