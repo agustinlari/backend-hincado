@@ -266,6 +266,8 @@ app.post('/api/auth/logout', (c) => {
 
 // Middleware for protected routes
 const authMiddleware = async (c: any, next: any) => {
+  console.log(`🔐 Auth middleware called for: ${c.req.method} ${c.req.url}`);
+  
   // Skip auth in development mode if enabled
   if (process.env.ENABLE_DEV_AUTH === 'true') {
     c.set('user', { sub: '1', email: 'dev@example.com', name: 'Dev User' })
@@ -275,6 +277,7 @@ const authMiddleware = async (c: any, next: any) => {
   const authHeader = c.req.header('Authorization')
   
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    console.error('❌ No authorization header found');
     return c.json({ error: 'Authentication required' }, 401)
   }
   
@@ -289,9 +292,10 @@ const authMiddleware = async (c: any, next: any) => {
       name: keycloakUser.name || keycloakUser.preferred_username,
       preferred_username: keycloakUser.preferred_username
     })
+    console.log(`✅ Auth successful for: ${c.req.method} ${c.req.url}`);
     return next()
   } catch (error: any) {
-    console.error('Auth middleware failed:', error.message);
+    console.error(`❌ Auth failed for ${c.req.method} ${c.req.url}:`, error.message);
     return c.json({ error: 'Invalid token' }, 401)
   }
 }
@@ -359,6 +363,7 @@ app.get('/api/mesas/:id', authMiddleware, async (c) => {
 // Get components for a mesa
 app.get('/api/mesas/:id/components', authMiddleware, async (c) => {
   const id = c.req.param('id')
+  console.log(`🔍 GET /api/mesas/${id}/components called`)
   try {
     const query = `
       SELECT 
@@ -373,6 +378,7 @@ app.get('/api/mesas/:id/components', authMiddleware, async (c) => {
       ORDER BY pc.tipo_elemento, pc.coord_x, pc.coord_y
     `
     const result = await pool.query(query, [id])
+    console.log(`✅ Found ${result.rows.length} components for mesa ${id}`)
     return c.json(result.rows)
   } catch (error) {
     console.error('Error fetching mesa components:', error)
