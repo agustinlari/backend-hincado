@@ -747,6 +747,79 @@ app.post('/api/resultados-ensayos', authMiddleware, async (c) => {
   }
 })
 
+// Get all components with mesa information
+app.get('/api/components', authMiddleware, async (c) => {
+  try {
+    const query = `
+      SELECT 
+        pc.id_componente,
+        pc.id_plantilla,
+        pc.tipo_elemento,
+        pc.coord_x,
+        pc.coord_y,
+        pc.descripcion_punto_montaje,
+        mp.nombre_plantilla,
+        mp.descripcion as plantilla_descripcion,
+        mp.dimension_x as plantilla_dimension_x,
+        mp.dimension_y as plantilla_dimension_y,
+        m.id_mesa,
+        m.nombre_mesa,
+        m.coord_x as mesa_coord_x,
+        m.coord_y as mesa_coord_y,
+        ct.nombre_ct
+      FROM plantilla_componentes pc
+      JOIN mesa_plantillas mp ON pc.id_plantilla = mp.id_plantilla
+      JOIN mesas m ON m.id_plantilla = mp.id_plantilla
+      JOIN cts ct ON m.id_ct = ct.id_ct
+      ORDER BY ct.nombre_ct, m.nombre_mesa, pc.tipo_elemento, pc.id_componente
+    `
+    
+    const result = await pool.query(query)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching components:', error)
+    return c.json({ error: 'Failed to fetch components' }, 500)
+  }
+})
+
+// Get latest test results for components
+app.get('/api/components/test-results/latest', authMiddleware, async (c) => {
+  try {
+    const query = `
+      WITH latest_results AS (
+        SELECT 
+          re.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY re.id_componente_plantilla_1, re.id_tipo_ensayo 
+            ORDER BY re.fecha_medicion DESC, re.id_resultado DESC
+          ) as rn
+        FROM resultados_ensayos re
+        WHERE re.id_componente_plantilla_1 IS NOT NULL
+      )
+      SELECT 
+        lr.id_componente_plantilla_1 as id_componente,
+        lr.id_tipo_ensayo,
+        lr.resultado_numerico,
+        lr.resultado_booleano,
+        lr.resultado_texto,
+        lr.fecha_medicion,
+        te.nombre_ensayo,
+        te.tipo_resultado,
+        te.unidad_medida
+      FROM latest_results lr
+      JOIN tipos_ensayo te ON lr.id_tipo_ensayo = te.id_tipo_ensayo
+      WHERE lr.rn = 1
+      ORDER BY lr.id_componente_plantilla_1, te.grupo_ensayo, te.nombre_ensayo
+    `
+    
+    const result = await pool.query(query)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching component test results:', error)
+    return c.json({ error: 'Failed to fetch component test results' }, 500)
+  }
+})
+
 // Get latest test results for all mesas and test types
 app.get('/api/resultados-ensayos/latest', authMiddleware, async (c) => {
   try {
