@@ -13,8 +13,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-producti
 
 // Configure CORS
 app.use('/*', cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:8789'],
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE'],
+  origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:8789', 'https://aplicaciones.osmos.es:4444'],
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowHeaders: ['Content-Type', 'Authorization'],
 }))
 
@@ -612,32 +612,6 @@ app.patch('/api/inspecciones/:id', authMiddleware, async (c) => {
   }
 })
 
-// Delete inspection
-app.delete('/api/inspecciones/:id', authMiddleware, async (c) => {
-  try {
-    const id_inspeccion = c.req.param('id')
-    
-    const query = `
-      DELETE FROM inspecciones 
-      WHERE id_inspeccion = $1
-      RETURNING *
-    `
-    
-    const result = await pool.query(query, [id_inspeccion])
-    
-    if (result.rows.length === 0) {
-      return c.json({ error: 'Inspection not found' }, 404)
-    }
-    
-    return c.json({
-      success: true,
-      message: 'Inspección eliminada exitosamente'
-    })
-  } catch (error) {
-    console.error('Error deleting inspection:', error)
-    return c.json({ error: 'Failed to delete inspection' }, 500)
-  }
-})
 
 // Get all inspections
 app.get('/api/inspecciones', authMiddleware, async (c) => {
@@ -661,8 +635,14 @@ app.get('/api/inspecciones', authMiddleware, async (c) => {
   }
 })
 
+// Test endpoint for DELETE method
+app.delete('/api/test-delete/:id', async (c) => {
+  return c.json({ success: true, message: 'DELETE test successful', id: c.req.param('id') })
+})
+
 // Delete inspection
 app.delete('/api/inspecciones/:id', authMiddleware, async (c) => {
+  console.log('🗑️ DELETE /api/inspecciones/:id called with id:', c.req.param('id'))
   try {
     const id_inspeccion = c.req.param('id')
     
