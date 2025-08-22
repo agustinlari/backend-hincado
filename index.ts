@@ -259,7 +259,12 @@ app.post('/api/auth/logout', (c) => {
   const keycloakUrl = process.env.KEYCLOAK_BASE_URL || 'https://aplicaciones.osmos.es:4444'
   const realm = process.env.KEYCLOAK_REALM || 'master'
   
-  const logoutUrl = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/logout`
+  // Get the current origin to redirect back to login
+  const host = c.req.header('host') || 'aplicaciones.osmos.es:4444'
+  const protocol = host.includes('localhost') ? 'http' : 'https'
+  const redirectUri = `${protocol}://${host}/fvhincado/`
+  
+  const logoutUrl = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/logout?redirect_uri=${encodeURIComponent(redirectUri)}`
   
   return c.json({ logoutUrl })
 })
