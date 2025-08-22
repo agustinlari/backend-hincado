@@ -776,7 +776,8 @@ app.get('/api/components', authMiddleware, async (c) => {
       JOIN mesa_plantillas mp ON pc.id_plantilla = mp.id_plantilla
       JOIN mesas m ON m.id_plantilla = mp.id_plantilla
       JOIN cts ct ON m.id_ct = ct.id_ct
-      ORDER BY ct.nombre_ct, m.nombre_mesa, pc.tipo_elemento, pc.id_componente
+      WHERE pc.tipo_elemento = 'PUNTO_MONTAJE'
+      ORDER BY ct.nombre_ct, m.nombre_mesa, pc.id_componente
     `
     
     const result = await pool.query(query)
