@@ -791,19 +791,25 @@ app.get('/api/components', authMiddleware, async (c) => {
 // Get latest test results for components
 app.get('/api/components/test-results/latest', authMiddleware, async (c) => {
   try {
+    // CORRECTED: Partition by mesa + component + test type to get results per specific component in specific mesa
     const query = `
       WITH latest_results AS (
         SELECT 
           re.*,
           ROW_NUMBER() OVER (
-            PARTITION BY re.id_componente_plantilla_1, re.id_tipo_ensayo 
+            PARTITION BY re.id_mesa, re.id_componente_plantilla_1, re.id_tipo_ensayo 
             ORDER BY re.fecha_medicion DESC, re.id_resultado DESC
           ) as rn
         FROM resultados_ensayos re
+        INNER JOIN mesas m ON m.id_mesa = re.id_mesa
+        INNER JOIN inspecciones i ON re.id_inspeccion = i.id_inspeccion
         WHERE re.id_componente_plantilla_1 IS NOT NULL
       )
       SELECT 
-        lr.id_componente_plantilla_1 as id_componente,
+        -- Create a unique component identifier per mesa
+        CONCAT(lr.id_mesa, '_', lr.id_componente_plantilla_1) as id_componente,
+        lr.id_mesa,
+        lr.id_componente_plantilla_1,
         lr.id_tipo_ensayo,
         lr.resultado_numerico,
         lr.resultado_booleano,
@@ -813,9 +819,9 @@ app.get('/api/components/test-results/latest', authMiddleware, async (c) => {
         te.tipo_resultado,
         te.unidad_medida
       FROM latest_results lr
-      JOIN tipos_ensayo te ON lr.id_tipo_ensayo = te.id_tipo_ensayo
+      INNER JOIN tipos_ensayo te ON lr.id_tipo_ensayo = te.id_tipo_ensayo
       WHERE lr.rn = 1
-      ORDER BY lr.id_componente_plantilla_1, te.grupo_ensayo, te.nombre_ensayo
+      ORDER BY lr.id_mesa, lr.id_componente_plantilla_1, te.grupo_ensayo, te.nombre_ensayo
     `
     
     const result = await pool.query(query)
@@ -827,17 +833,82 @@ app.get('/api/components/test-results/latest', authMiddleware, async (c) => {
 })
 
 // Get latest test results for all mesas and test types
+// Debug endpoint to check resultados_ensayos raw data
+app.get('/api/resultados-ensayos/debug', authMiddleware, async (c) => {
+  try {
+    const query = `
+      SELECT 
+        re.id_resultado,
+        re.id_mesa,
+        re.id_tipo_ensayo,
+        re.resultado_numerico,
+        re.resultado_booleano,
+        re.resultado_texto,
+        re.fecha_medicion,
+        te.nombre_ensayo,
+        m.nombre_mesa
+      FROM resultados_ensayos re
+      JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+      LEFT JOIN mesas m ON re.id_mesa = m.id_mesa
+      ORDER BY re.id_mesa, te.nombre_ensayo, re.fecha_medicion DESC
+    `
+    
+    const result = await pool.query(query)
+    console.log('📊 Debug resultados_ensayos:')
+    console.log('Total rows:', result.rows.length)
+    
+    // Group by tipo_ensayo to see distribution
+    const byTipoEnsayo = result.rows.reduce((acc, row) => {
+      const tipo = row.nombre_ensayo
+      if (!acc[tipo]) acc[tipo] = []
+      acc[tipo].push({
+        id_mesa: row.id_mesa,
+        nombre_mesa: row.nombre_mesa,
+        fecha_medicion: row.fecha_medicion
+      })
+      return acc
+    }, {})
+    
+    console.log('Distribution by tipo_ensayo:')
+    Object.entries(byTipoEnsayo).forEach(([tipo, registros]) => {
+      console.log(`  ${tipo}: ${registros.length} registros`)
+      registros.slice(0, 3).forEach(r => {
+        console.log(`    - Mesa ${r.id_mesa} (${r.nombre_mesa}) - ${r.fecha_medicion}`)
+      })
+    })
+    
+    return c.json({
+      total_rows: result.rows.length,
+      distribution: Object.fromEntries(
+        Object.entries(byTipoEnsayo).map(([tipo, registros]) => [tipo, registros.length])
+      ),
+      sample_data: result.rows.slice(0, 10)
+    })
+  } catch (error) {
+    console.error('Error in debug endpoint:', error)
+    return c.json({ error: 'Debug query failed' }, 500)
+  }
+})
+
 app.get('/api/resultados-ensayos/latest', authMiddleware, async (c) => {
   try {
+    // Clean, simple query - only return results for the exact mesa they belong to
     const query = `
       WITH latest_results AS (
         SELECT 
-          re.*,
+          re.id_mesa,
+          re.id_tipo_ensayo,
+          re.resultado_numerico,
+          re.resultado_booleano,
+          re.resultado_texto,
+          re.fecha_medicion,
           ROW_NUMBER() OVER (
             PARTITION BY re.id_mesa, re.id_tipo_ensayo 
             ORDER BY re.fecha_medicion DESC, re.id_resultado DESC
           ) as rn
         FROM resultados_ensayos re
+        INNER JOIN mesas m ON m.id_mesa = re.id_mesa
+        INNER JOIN inspecciones i ON re.id_inspeccion = i.id_inspeccion
       )
       SELECT 
         lr.id_mesa,
@@ -850,7 +921,7 @@ app.get('/api/resultados-ensayos/latest', authMiddleware, async (c) => {
         te.tipo_resultado,
         te.unidad_medida
       FROM latest_results lr
-      JOIN tipos_ensayo te ON lr.id_tipo_ensayo = te.id_tipo_ensayo
+      INNER JOIN tipos_ensayo te ON lr.id_tipo_ensayo = te.id_tipo_ensayo
       WHERE lr.rn = 1
       ORDER BY lr.id_mesa, te.grupo_ensayo, te.nombre_ensayo
     `
