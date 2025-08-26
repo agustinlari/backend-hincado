@@ -946,6 +946,7 @@ app.get('/api/components/test-results/latest', authMiddleware, async (c) => {
         lr.resultado_numerico,
         lr.resultado_booleano,
         lr.resultado_texto,
+        lr.comentario,
         lr.fecha_medicion,
         te.nombre_ensayo,
         te.tipo_resultado,
