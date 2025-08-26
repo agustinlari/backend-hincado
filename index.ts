@@ -756,11 +756,17 @@ app.get('/api/mesas/:id/inspecciones', authMiddleware, async (c) => {
   try {
     const user = c.get('user');
     
+    // Get query parameters for filtering
+    const showAll = c.req.query('showAll') === 'true';
+    const filterByUser = c.req.query('filterByUser') !== 'false'; // Default to true
+    const filterByStatus = c.req.query('filterByStatus') !== 'false'; // Default to true
+    
     // Store current user info in cache if available
+    let currentUserId = 1;
     if (user?.sub) {
-      const currentUserId = user.sub ? Math.abs(user.sub.split('').reduce((hash, char) => {
+      currentUserId = Math.abs(user.sub.split('').reduce((hash, char) => {
         return ((hash << 5) - hash + char.charCodeAt(0)) & 0xffffffff;
-      }, 0)) : 1;
+      }, 0));
       
       storeUserInfo(user.sub, currentUserId, {
         name: user.name,
@@ -768,7 +774,8 @@ app.get('/api/mesas/:id/inspecciones', authMiddleware, async (c) => {
       });
     }
     
-    const query = `
+    // Build query with conditional WHERE clause
+    let query = `
       SELECT 
         id_inspeccion,
         fecha_inicio,
@@ -777,9 +784,36 @@ app.get('/api/mesas/:id/inspecciones', authMiddleware, async (c) => {
         estado,
         id_usuario
       FROM inspecciones
-      ORDER BY fecha_inicio DESC
-    `
-    const result = await pool.query(query)
+    `;
+    
+    const conditions = [];
+    const params = [];
+    let paramIndex = 1;
+    
+    // Apply filters if not showing all
+    if (!showAll) {
+      if (filterByUser) {
+        conditions.push(`id_usuario = $${paramIndex}`);
+        params.push(currentUserId);
+        paramIndex++;
+      }
+      
+      if (filterByStatus) {
+        conditions.push(`estado = $${paramIndex}`);
+        params.push('EN_PROCESO');
+        paramIndex++;
+      }
+    }
+    
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(' AND ')}`;
+    }
+    
+    query += ` ORDER BY fecha_inicio DESC`;
+    
+    console.log('🔍 Query inspecciones:', { query, params, showAll, currentUserId, userSub: user?.sub });
+    
+    const result = await pool.query(query, params)
     
     // Enrich inspections with user information
     const enrichedInspections = await Promise.all(result.rows.map(async (inspection) => {
