@@ -846,7 +846,8 @@ app.post('/api/resultados-ensayos', authMiddleware, async (c) => {
       id_componente_plantilla_2,
       resultado_numerico,
       resultado_booleano,
-      resultado_texto
+      resultado_texto,
+      comentario
     } = body
     
     // Validate required fields
@@ -860,16 +861,16 @@ app.post('/api/resultados-ensayos', authMiddleware, async (c) => {
       INSERT INTO resultados_ensayos (
         id_inspeccion, id_tipo_ensayo, id_mesa, 
         id_componente_plantilla_1, id_componente_plantilla_2,
-        resultado_numerico, resultado_booleano, resultado_texto
+        resultado_numerico, resultado_booleano, resultado_texto, comentario
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
     `
     
     const result = await pool.query(query, [
       id_inspeccion, id_tipo_ensayo, id_mesa,
       id_componente_plantilla_1, id_componente_plantilla_2,
-      resultado_numerico, resultado_booleano, resultado_texto
+      resultado_numerico, resultado_booleano, resultado_texto, comentario
     ])
     
     return c.json({
