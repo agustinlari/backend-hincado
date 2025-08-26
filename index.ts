@@ -594,6 +594,14 @@ app.post('/api/inspecciones', authMiddleware, async (c) => {
     
     console.log('👤 Creando inspección para usuario:', { id_usuario, userSub: user?.sub, username: user?.preferred_username });
     
+    // Store user info in cache for future lookups
+    if (user?.sub) {
+      userCache.set(user.sub, {
+        name: user.name,
+        preferred_username: user.preferred_username
+      });
+    }
+    
     const query = `
       INSERT INTO inspecciones (id_usuario, descripcion, estado)
       VALUES ($1, $2, 'EN_PROCESO')
@@ -703,6 +711,26 @@ app.delete('/api/inspecciones/:id', authMiddleware, async (c) => {
   }
 })
 
+// Simple user cache to map user IDs to user names
+// In a production environment, this should be a proper database table or Redis cache
+const userCache = new Map<string, { name?: string, preferred_username?: string }>();
+
+// Function to get or fetch user info
+async function getUserInfo(userId: string): Promise<{ name?: string, preferred_username?: string }> {
+  // Check cache first
+  if (userCache.has(userId)) {
+    return userCache.get(userId)!;
+  }
+  
+  // For now, return a placeholder. In a real implementation, you would:
+  // 1. Query a local users table, or
+  // 2. Make a call to Keycloak Admin API to get user info, or
+  // 3. Store user info when they first authenticate
+  const userInfo = { name: `Usuario ${userId}`, preferred_username: `user${userId}` };
+  userCache.set(userId, userInfo);
+  return userInfo;
+}
+
 // Get all inspections (simplified for now - later filter by mesa through resultados_ensayos)
 app.get('/api/mesas/:id/inspecciones', authMiddleware, async (c) => {
   try {
@@ -718,7 +746,18 @@ app.get('/api/mesas/:id/inspecciones', authMiddleware, async (c) => {
       ORDER BY fecha_inicio DESC
     `
     const result = await pool.query(query)
-    return c.json(result.rows)
+    
+    // Enrich inspections with user information
+    const enrichedInspections = await Promise.all(result.rows.map(async (inspection) => {
+      const userInfo = await getUserInfo(inspection.id_usuario.toString());
+      return {
+        ...inspection,
+        usuario_nombre: userInfo.name,
+        usuario_username: userInfo.preferred_username
+      };
+    }));
+    
+    return c.json(enrichedInspections)
   } catch (error) {
     console.error('Error fetching inspections:', error)
     return c.json({ error: 'Failed to fetch inspections' }, 500)
