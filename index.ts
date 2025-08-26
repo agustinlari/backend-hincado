@@ -262,9 +262,29 @@ app.post('/api/auth/logout', (c) => {
   // Get the current origin to redirect back to login
   const host = c.req.header('host') || 'aplicaciones.osmos.es:4444'
   const protocol = host.includes('localhost') ? 'http' : 'https'
-  const redirectUri = `${protocol}://${host}/fvhincado/`
   
-  const logoutUrl = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/logout?redirect_uri=${encodeURIComponent(redirectUri)}`
+  console.log(`🔧 DEBUG - host: ${host}`);
+  console.log(`🔧 DEBUG - keycloakUrl from env: ${process.env.KEYCLOAK_BASE_URL}`);
+  console.log(`🔧 DEBUG - keycloakUrl final: ${keycloakUrl}`);
+  
+  // Construct the correct redirect URI for the login page
+  let redirectUri;
+  if (host.includes('localhost')) {
+    // Development environment - redirect to local app
+    redirectUri = `${protocol}://${host}/`
+  } else {
+    // Production environment - redirect back to the fvhincado app
+    // Try with just the base URL in case the client allows wildcards
+    redirectUri = 'https://aplicaciones.osmos.es:4444/fvhincado'
+    
+    console.log(`🔧 DEBUG - Redirect URI: ${redirectUri}`);
+  }
+  
+  // Fix: Keycloak is served under /auth/ according to nginx config
+  const logoutUrl = `${keycloakUrl}/auth/realms/${realm}/protocol/openid-connect/logout?redirect_uri=${encodeURIComponent(redirectUri)}`
+  
+  console.log(`🚪 Logout URL generada: ${logoutUrl}`);
+  console.log(`🔄 Redirect URI: ${redirectUri}`);
   
   return c.json({ logoutUrl })
 })
