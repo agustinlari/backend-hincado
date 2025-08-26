@@ -590,13 +590,16 @@ app.post('/api/inspecciones', authMiddleware, async (c) => {
     const user = c.get('user')
     
     // Extract user ID from the JWT token (sub field contains the user ID)
-    const id_usuario = user?.sub ? parseInt(user.sub) : 1
+    // For now, we'll use a hash of the sub to create a consistent integer ID
+    const id_usuario = user?.sub ? Math.abs(user.sub.split('').reduce((hash, char) => {
+      return ((hash << 5) - hash + char.charCodeAt(0)) & 0xffffffff;
+    }, 0)) : 1
     
     console.log('👤 Creando inspección para usuario:', { id_usuario, userSub: user?.sub, username: user?.preferred_username });
     
     // Store user info in cache for future lookups
     if (user?.sub) {
-      userCache.set(user.sub, {
+      storeUserInfo(user.sub, id_usuario, {
         name: user.name,
         preferred_username: user.preferred_username
       });
@@ -711,13 +714,22 @@ app.delete('/api/inspecciones/:id', authMiddleware, async (c) => {
   }
 })
 
-// Simple user cache to map user IDs to user names
-// In a production environment, this should be a proper database table or Redis cache
-const userCache = new Map<string, { name?: string, preferred_username?: string }>();
+// User cache to store user information
+// Maps both UUID (from JWT) and integer ID (from DB) to user info
+const userCache = new Map<string, { name?: string, preferred_username?: string, userId?: number, uuid?: string }>();
+const idToUuidCache = new Map<number, string>(); // Maps integer ID back to UUID
 
-// Function to get or fetch user info
+// Function to get or fetch user info by integer ID
 async function getUserInfo(userId: string): Promise<{ name?: string, preferred_username?: string }> {
-  // Check cache first
+  const numericUserId = parseInt(userId);
+  
+  // First check if we have UUID mapping for this numeric ID
+  const uuid = idToUuidCache.get(numericUserId);
+  if (uuid && userCache.has(uuid)) {
+    return userCache.get(uuid)!;
+  }
+  
+  // Check cache by string ID directly
   if (userCache.has(userId)) {
     return userCache.get(userId)!;
   }
@@ -731,9 +743,31 @@ async function getUserInfo(userId: string): Promise<{ name?: string, preferred_u
   return userInfo;
 }
 
+// Function to store user info and create mappings
+function storeUserInfo(uuid: string, userId: number, userInfo: { name?: string, preferred_username?: string }) {
+  // Store in cache with UUID as key
+  userCache.set(uuid, { ...userInfo, userId, uuid });
+  // Create reverse mapping from integer ID to UUID
+  idToUuidCache.set(userId, uuid);
+}
+
 // Get all inspections (simplified for now - later filter by mesa through resultados_ensayos)
 app.get('/api/mesas/:id/inspecciones', authMiddleware, async (c) => {
   try {
+    const user = c.get('user');
+    
+    // Store current user info in cache if available
+    if (user?.sub) {
+      const currentUserId = user.sub ? Math.abs(user.sub.split('').reduce((hash, char) => {
+        return ((hash << 5) - hash + char.charCodeAt(0)) & 0xffffffff;
+      }, 0)) : 1;
+      
+      storeUserInfo(user.sub, currentUserId, {
+        name: user.name,
+        preferred_username: user.preferred_username
+      });
+    }
+    
     const query = `
       SELECT 
         id_inspeccion,
