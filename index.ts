@@ -588,7 +588,11 @@ app.post('/api/inspecciones', authMiddleware, async (c) => {
     
     // Get user ID from auth token
     const user = c.get('user')
-    const id_usuario = 1 // Por ahora usamos un ID fijo, después podríamos extraerlo del token
+    
+    // Extract user ID from the JWT token (sub field contains the user ID)
+    const id_usuario = user?.sub ? parseInt(user.sub) : 1
+    
+    console.log('👤 Creando inspección para usuario:', { id_usuario, userSub: user?.sub, username: user?.preferred_username });
     
     const query = `
       INSERT INTO inspecciones (id_usuario, descripcion, estado)
