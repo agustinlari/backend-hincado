@@ -578,6 +578,176 @@ app.post('/api/tipos-ensayo', authMiddleware, async (c) => {
   }
 })
 
+// ==================== REGLAS DE COLORES PARA RESULTADOS ====================
+
+// Get all color rules for test results
+app.get('/api/reglas-resultados-ensayos', authMiddleware, async (c) => {
+  try {
+    const query = `
+      SELECT 
+        r.id,
+        r.id_tipo_ensayo,
+        r.tipo_condicion,
+        r.valor_numerico_1,
+        r.valor_numerico_2,
+        r.valor_booleano,
+        r.valor_texto,
+        r.resaltado,
+        r.comentario,
+        r.prioridad,
+        te.nombre_ensayo,
+        te.tipo_resultado
+      FROM reglas_resultados_ensayos r
+      JOIN tipos_ensayo te ON r.id_tipo_ensayo = te.id_tipo_ensayo
+      ORDER BY r.id_tipo_ensayo, r.prioridad DESC, r.id
+    `
+    const result = await pool.query(query)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching color rules:', error)
+    return c.json({ error: 'Failed to fetch color rules' }, 500)
+  }
+})
+
+// Create color rule
+app.post('/api/reglas-resultados-ensayos', authMiddleware, async (c) => {
+  try {
+    const body = await c.req.json()
+    const { 
+      id_tipo_ensayo,
+      tipo_condicion,
+      valor_numerico_1,
+      valor_numerico_2,
+      valor_booleano,
+      valor_texto,
+      resaltado,
+      comentario,
+      prioridad = 0
+    } = body
+    
+    if (!id_tipo_ensayo || !tipo_condicion) {
+      return c.json({ error: 'Missing required fields: id_tipo_ensayo, tipo_condicion' }, 400)
+    }
+    
+    // Validate tipo_condicion
+    const validConditions = ['=', '<>', '>', '<', '>=', '<=', 'ENTRE', 'FUERA_DE']
+    if (!validConditions.includes(tipo_condicion)) {
+      return c.json({ error: 'Invalid tipo_condicion. Must be one of: ' + validConditions.join(', ') }, 400)
+    }
+    
+    const query = `
+      INSERT INTO reglas_resultados_ensayos (
+        id_tipo_ensayo, tipo_condicion, valor_numerico_1, valor_numerico_2,
+        valor_booleano, valor_texto, resaltado, comentario, prioridad
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *
+    `
+    
+    const result = await pool.query(query, [
+      id_tipo_ensayo, tipo_condicion, valor_numerico_1, valor_numerico_2,
+      valor_booleano, valor_texto, resaltado, comentario, prioridad
+    ])
+    
+    return c.json({
+      success: true,
+      regla: result.rows[0],
+      message: 'Regla de color creada exitosamente'
+    })
+  } catch (error) {
+    console.error('Error creating color rule:', error)
+    return c.json({ error: 'Failed to create color rule' }, 500)
+  }
+})
+
+// Update color rule
+app.put('/api/reglas-resultados-ensayos/:id', authMiddleware, async (c) => {
+  try {
+    const id = c.req.param('id')
+    const body = await c.req.json()
+    const { 
+      id_tipo_ensayo,
+      tipo_condicion,
+      valor_numerico_1,
+      valor_numerico_2,
+      valor_booleano,
+      valor_texto,
+      resaltado,
+      comentario,
+      prioridad
+    } = body
+    
+    // Validate tipo_condicion if provided
+    if (tipo_condicion) {
+      const validConditions = ['=', '<>', '>', '<', '>=', '<=', 'ENTRE', 'FUERA_DE']
+      if (!validConditions.includes(tipo_condicion)) {
+        return c.json({ error: 'Invalid tipo_condicion. Must be one of: ' + validConditions.join(', ') }, 400)
+      }
+    }
+    
+    const query = `
+      UPDATE reglas_resultados_ensayos 
+      SET 
+        id_tipo_ensayo = COALESCE($1, id_tipo_ensayo),
+        tipo_condicion = COALESCE($2, tipo_condicion),
+        valor_numerico_1 = COALESCE($3, valor_numerico_1),
+        valor_numerico_2 = COALESCE($4, valor_numerico_2),
+        valor_booleano = COALESCE($5, valor_booleano),
+        valor_texto = COALESCE($6, valor_texto),
+        resaltado = COALESCE($7, resaltado),
+        comentario = COALESCE($8, comentario),
+        prioridad = COALESCE($9, prioridad)
+      WHERE id = $10
+      RETURNING *
+    `
+    
+    const result = await pool.query(query, [
+      id_tipo_ensayo, tipo_condicion, valor_numerico_1, valor_numerico_2,
+      valor_booleano, valor_texto, resaltado, comentario, prioridad, id
+    ])
+    
+    if (result.rows.length === 0) {
+      return c.json({ error: 'Color rule not found' }, 404)
+    }
+    
+    return c.json({
+      success: true,
+      regla: result.rows[0],
+      message: 'Regla de color actualizada exitosamente'
+    })
+  } catch (error) {
+    console.error('Error updating color rule:', error)
+    return c.json({ error: 'Failed to update color rule' }, 500)
+  }
+})
+
+// Delete color rule
+app.delete('/api/reglas-resultados-ensayos/:id', authMiddleware, async (c) => {
+  try {
+    const id = c.req.param('id')
+    
+    const query = `
+      DELETE FROM reglas_resultados_ensayos 
+      WHERE id = $1
+      RETURNING id
+    `
+    
+    const result = await pool.query(query, [id])
+    
+    if (result.rows.length === 0) {
+      return c.json({ error: 'Color rule not found' }, 404)
+    }
+    
+    return c.json({
+      success: true,
+      message: 'Regla de color eliminada exitosamente'
+    })
+  } catch (error) {
+    console.error('Error deleting color rule:', error)
+    return c.json({ error: 'Failed to delete color rule' }, 500)
+  }
+})
+
 // ==================== INSPECCIONES ====================
 
 // Create a new inspection session
