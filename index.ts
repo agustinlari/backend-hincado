@@ -1321,6 +1321,151 @@ app.get('/api/inspecciones/:id/resultados', authMiddleware, async (c) => {
   }
 })
 
+// Dashboard statistics endpoint
+app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
+  try {
+    console.log('📊 Fetching real dashboard statistics...')
+    
+    // Get total number of tests
+    const totalEnsayosQuery = 'SELECT COUNT(*) as total FROM resultados_ensayos'
+    const totalEnsayosResult = await pool.query(totalEnsayosQuery)
+    const totalEnsayos = parseInt(totalEnsayosResult.rows[0].total)
+    
+    // Get failed tests - boolean tests that are false
+    const ensayosBooleanosQuery = 'SELECT COUNT(*) as total FROM resultados_ensayos WHERE resultado_booleano IS NOT NULL'
+    const ensayosBooleanosResult = await pool.query(ensayosBooleanosQuery)
+    const totalEnsayosBooleanos = parseInt(ensayosBooleanosResult.rows[0].total)
+    
+    const ensayosFallidosBooleanoQuery = 'SELECT COUNT(*) as total FROM resultados_ensayos WHERE resultado_booleano = false'
+    const ensayosFallidosBooleanoResult = await pool.query(ensayosFallidosBooleanoQuery)
+    const ensayosFallidosBooleanos = parseInt(ensayosFallidosBooleanoResult.rows[0].total)
+    
+    // Get failed tests from numeric results using color rules
+    const ensayosFallidosNumericosQuery = `
+      SELECT COUNT(DISTINCT re.id_resultado) as total 
+      FROM resultados_ensayos re
+      JOIN reglas_resultados_ensayos r ON re.id_tipo_ensayo = r.id_tipo_ensayo
+      WHERE re.resultado_numerico IS NOT NULL
+      AND r.resaltado = '#F54927'
+      AND (
+        (r.tipo_condicion = '=' AND re.resultado_numerico = r.valor_numerico_1) OR
+        (r.tipo_condicion = '<>' AND re.resultado_numerico != r.valor_numerico_1) OR
+        (r.tipo_condicion = '>' AND re.resultado_numerico > r.valor_numerico_1) OR
+        (r.tipo_condicion = '<' AND re.resultado_numerico < r.valor_numerico_1) OR
+        (r.tipo_condicion = '>=' AND re.resultado_numerico >= r.valor_numerico_1) OR
+        (r.tipo_condicion = '<=' AND re.resultado_numerico <= r.valor_numerico_1) OR
+        (r.tipo_condicion = 'ENTRE' AND re.resultado_numerico >= r.valor_numerico_1 AND re.resultado_numerico <= r.valor_numerico_2) OR
+        (r.tipo_condicion = 'FUERA_DE' AND (re.resultado_numerico < r.valor_numerico_1 OR re.resultado_numerico > r.valor_numerico_2))
+      )
+    `
+    const ensayosFallidosNumericosResult = await pool.query(ensayosFallidosNumericosQuery)
+    const ensayosFallidosNumericos = parseInt(ensayosFallidosNumericosResult.rows[0].total || 0)
+    
+    const ensayosFallidos = ensayosFallidosBooleanos + ensayosFallidosNumericos
+    
+    // Calculate success rate
+    const tasaExito = totalEnsayos > 0 ? Math.round(((totalEnsayos - ensayosFallidos) / totalEnsayos) * 100 * 10) / 10 : 100
+    
+    // Get number of inspected tables
+    const mesasInspeccionadasQuery = 'SELECT COUNT(DISTINCT id_mesa) as total FROM resultados_ensayos'
+    const mesasInspeccionadasResult = await pool.query(mesasInspeccionadasQuery)
+    const mesasInspeccionadas = parseInt(mesasInspeccionadasResult.rows[0].total)
+    
+    // Get active inspections
+    const inspeccionesActivasQuery = "SELECT COUNT(*) as total FROM inspecciones WHERE estado = 'EN_PROCESO'"
+    const inspeccionesActivasResult = await pool.query(inspeccionesActivasQuery)
+    const inspeccionesActivas = parseInt(inspeccionesActivasResult.rows[0].total)
+    
+    // Get tests by type (HINCAS vs POT)
+    const ensayosPorTipoQuery = `
+      SELECT 
+        COALESCE(te.grupo_ensayo, 'SIN_GRUPO') as tipo, 
+        COUNT(re.id_resultado) as cantidad
+      FROM resultados_ensayos re
+      JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+      GROUP BY te.grupo_ensayo
+      ORDER BY cantidad DESC
+    `
+    const ensayosPorTipoResult = await pool.query(ensayosPorTipoQuery)
+    const ensayosPorTipo = ensayosPorTipoResult.rows
+    
+    // Get results by test result type
+    const ensayosPorTipoResultadoQuery = `
+      SELECT 
+        te.tipo_resultado as tipo,
+        COUNT(re.id_resultado) as cantidad,
+        SUM(CASE WHEN re.resultado_booleano = false THEN 1 ELSE 0 END) as fallidos_booleanos
+      FROM resultados_ensayos re
+      JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+      GROUP BY te.tipo_resultado
+      ORDER BY cantidad DESC
+    `
+    const ensayosPorTipoResultadoResult = await pool.query(ensayosPorTipoResultadoQuery)
+    const ensayosPorTipoResultado = ensayosPorTipoResultadoResult.rows
+    
+    // Get temporal evolution (last 12 months)
+    const evolucionTemporalQuery = `
+      SELECT 
+        TO_CHAR(fecha_medicion, 'YYYY-MM') as fecha,
+        COUNT(id_resultado) as cantidad,
+        SUM(CASE WHEN resultado_booleano = false THEN 1 ELSE 0 END) as fallidos
+      FROM resultados_ensayos
+      WHERE fecha_medicion >= CURRENT_DATE - INTERVAL '12 months'
+      GROUP BY TO_CHAR(fecha_medicion, 'YYYY-MM')
+      ORDER BY fecha
+    `
+    const evolucionTemporalResult = await pool.query(evolucionTemporalQuery)
+    const evolucionTemporal = evolucionTemporalResult.rows
+    
+    // Get most failed test types
+    const tiposEnsayoMasFallidosQuery = `
+      SELECT 
+        te.nombre_ensayo,
+        te.tipo_resultado,
+        COUNT(re.id_resultado) as total_ensayos,
+        SUM(CASE WHEN re.resultado_booleano = false THEN 1 ELSE 0 END) as fallidos_booleanos,
+        ROUND(
+          (SUM(CASE WHEN re.resultado_booleano = false THEN 1 ELSE 0 END)::numeric / 
+          NULLIF(COUNT(CASE WHEN re.resultado_booleano IS NOT NULL THEN 1 END), 0)) * 100, 1
+        ) as porcentaje_fallos
+      FROM tipos_ensayo te
+      LEFT JOIN resultados_ensayos re ON te.id_tipo_ensayo = re.id_tipo_ensayo
+      WHERE te.tipo_resultado = 'BOOLEANO'
+      GROUP BY te.id_tipo_ensayo, te.nombre_ensayo, te.tipo_resultado
+      HAVING COUNT(re.id_resultado) > 0
+      ORDER BY fallidos_booleanos DESC, porcentaje_fallos DESC
+      LIMIT 5
+    `
+    const tiposEnsayoMasFallidosResult = await pool.query(tiposEnsayoMasFallidosQuery)
+    const tiposEnsayoMasFallidos = tiposEnsayoMasFallidosResult.rows
+    
+    const estadisticas = {
+      totalEnsayos,
+      ensayosFallidos,
+      ensayosFallidosBooleanos,
+      ensayosFallidosNumericos,
+      totalEnsayosBooleanos,
+      tasaExito,
+      mesasInspeccionadas,
+      inspeccionesActivas,
+      ensayosPorTipo,
+      ensayosPorTipoResultado,
+      evolucionTemporal,
+      tiposEnsayoMasFallidos
+    }
+    
+    console.log('📈 Real dashboard statistics generated:', {
+      ...estadisticas,
+      tiposEnsayoMasFallidos: estadisticas.tiposEnsayoMasFallidos.length
+    })
+    return c.json(estadisticas)
+    
+  } catch (error) {
+    console.error('Error fetching dashboard statistics:', error)
+    return c.json({ error: 'Failed to fetch dashboard statistics' }, 500)
+  }
+})
+
 // Start the server
 const port = process.env.PORT ? parseInt(process.env.PORT) : 8787
 
