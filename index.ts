@@ -1137,6 +1137,51 @@ app.get('/api/components/test-results/latest', authMiddleware, async (c) => {
   }
 })
 
+// Get latest test results for a specific mesa
+app.get('/api/mesas/:id/test-results/latest', authMiddleware, async (c) => {
+  const mesaId = c.req.param('id')
+  try {
+    // Optimized query - only get results for the specific mesa
+    const query = `
+      WITH latest_results AS (
+        SELECT 
+          re.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY re.id_componente_plantilla_1, re.id_tipo_ensayo 
+            ORDER BY re.fecha_medicion DESC, re.id_resultado DESC
+          ) as rn
+        FROM resultados_ensayos re
+        INNER JOIN inspecciones i ON re.id_inspeccion = i.id_inspeccion
+        WHERE re.id_mesa = $1 AND re.id_componente_plantilla_1 IS NOT NULL
+      )
+      SELECT 
+        -- Create a unique component identifier per mesa
+        CONCAT(lr.id_mesa, '_', lr.id_componente_plantilla_1) as id_componente,
+        lr.id_mesa,
+        lr.id_componente_plantilla_1,
+        lr.id_tipo_ensayo,
+        lr.resultado_numerico,
+        lr.resultado_booleano,
+        lr.resultado_texto,
+        lr.comentario,
+        lr.fecha_medicion,
+        te.nombre_ensayo,
+        te.tipo_resultado,
+        te.unidad_medida
+      FROM latest_results lr
+      INNER JOIN tipos_ensayo te ON lr.id_tipo_ensayo = te.id_tipo_ensayo
+      WHERE lr.rn = 1
+      ORDER BY lr.id_componente_plantilla_1, te.orden_prioridad ASC, te.grupo_ensayo, te.nombre_ensayo
+    `
+    
+    const result = await pool.query(query, [mesaId])
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching mesa test results:', error)
+    return c.json({ error: 'Failed to fetch mesa test results' }, 500)
+  }
+})
+
 // Get latest test results for all mesas and test types
 // Debug endpoint to check resultados_ensayos raw data
 app.get('/api/resultados-ensayos/debug', authMiddleware, async (c) => {
