@@ -1515,6 +1515,152 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
   }
 })
 
+// Report generation endpoints
+app.get('/api/inspecciones', authMiddleware, async (c) => {
+  try {
+    console.log('📋 Fetching all inspections...')
+    
+    const query = `
+      SELECT 
+        id_inspeccion,
+        id_usuario,
+        fecha_inicio,
+        fecha_fin,
+        descripcion,
+        estado
+      FROM inspecciones
+      ORDER BY fecha_inicio DESC
+      LIMIT 50
+    `
+    
+    const result = await pool.query(query)
+    console.log(`📋 Found ${result.rows.length} inspections`)
+    return c.json(result.rows)
+    
+  } catch (error) {
+    console.error('Error fetching inspections:', error)
+    return c.json({ error: 'Failed to fetch inspections' }, 500)
+  }
+})
+
+app.get('/api/inspecciones/:id/mesas', authMiddleware, async (c) => {
+  try {
+    const id_inspeccion = c.req.param('id')
+    console.log(`📋 Fetching mesas for inspection ${id_inspeccion}...`)
+    
+    const query = `
+      SELECT DISTINCT 
+        m.id_mesa,
+        m.id_ct,
+        m.nombre_mesa,
+        m.coord_x,
+        m.coord_y,
+        ct.nombre_ct
+      FROM mesas m
+      JOIN resultados_ensayos re ON m.id_mesa = re.id_mesa
+      LEFT JOIN cts ct ON m.id_ct = ct.id_ct
+      WHERE re.id_inspeccion = $1
+      ORDER BY m.id_mesa
+    `
+    
+    const result = await pool.query(query, [id_inspeccion])
+    console.log(`📋 Found ${result.rows.length} mesas for inspection ${id_inspeccion}`)
+    return c.json(result.rows)
+    
+  } catch (error) {
+    console.error('Error fetching inspection mesas:', error)
+    return c.json({ error: 'Failed to fetch inspection mesas' }, 500)
+  }
+})
+
+app.get('/api/inspecciones/:id/report-data', authMiddleware, async (c) => {
+  try {
+    const id_inspeccion = c.req.param('id')
+    console.log(`📋 Generating report data for inspection ${id_inspeccion}...`)
+    
+    // Get inspection details
+    const inspectionQuery = `
+      SELECT 
+        id_inspeccion,
+        id_usuario,
+        fecha_inicio,
+        fecha_fin,
+        descripcion,
+        estado
+      FROM inspecciones
+      WHERE id_inspeccion = $1
+    `
+    const inspectionResult = await pool.query(inspectionQuery, [id_inspeccion])
+    const inspection = inspectionResult.rows[0]
+    
+    if (!inspection) {
+      return c.json({ error: 'Inspection not found' }, 404)
+    }
+    
+    // Get mesas with their test results
+    const mesasQuery = `
+      SELECT DISTINCT 
+        m.id_mesa,
+        m.id_ct,
+        m.nombre_mesa,
+        m.coord_x,
+        m.coord_y,
+        ct.nombre_ct
+      FROM mesas m
+      JOIN resultados_ensayos re ON m.id_mesa = re.id_mesa
+      LEFT JOIN cts ct ON m.id_ct = ct.id_ct
+      WHERE re.id_inspeccion = $1
+      ORDER BY m.id_mesa
+    `
+    const mesasResult = await pool.query(mesasQuery, [id_inspeccion])
+    const mesas = mesasResult.rows
+    
+    // Get test results for each mesa
+    const mesasWithResults = []
+    for (const mesa of mesas) {
+      const resultsQuery = `
+        SELECT 
+          re.id_resultado,
+          re.resultado_numerico,
+          re.resultado_booleano,
+          re.resultado_texto,
+          re.fecha_medicion,
+          re.comentario,
+          te.nombre_ensayo,
+          te.tipo_resultado,
+          te.unidad_medida,
+          pc.descripcion_punto_montaje,
+          pc.coord_x as componente_x,
+          pc.coord_y as componente_y
+        FROM resultados_ensayos re
+        JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+        LEFT JOIN plantilla_componentes pc ON re.id_componente_plantilla_1 = pc.id_componente
+        WHERE re.id_inspeccion = $1 AND re.id_mesa = $2
+        ORDER BY pc.orden_prioridad ASC, te.orden_prioridad ASC
+      `
+      const resultsResult = await pool.query(resultsQuery, [id_inspeccion, mesa.id_mesa])
+      
+      mesasWithResults.push({
+        ...mesa,
+        resultados: resultsResult.rows
+      })
+    }
+    
+    const reportData = {
+      inspection,
+      mesas: mesasWithResults,
+      generated_at: new Date().toISOString()
+    }
+    
+    console.log(`📋 Generated report data for ${mesas.length} mesas`)
+    return c.json(reportData)
+    
+  } catch (error) {
+    console.error('Error generating report data:', error)
+    return c.json({ error: 'Failed to generate report data' }, 500)
+  }
+})
+
 // Start the server
 const port = process.env.PORT ? parseInt(process.env.PORT) : 8787
 
