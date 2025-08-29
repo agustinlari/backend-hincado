@@ -1331,7 +1331,7 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
     const totalEnsayosResult = await pool.query(totalEnsayosQuery)
     const totalEnsayos = parseInt(totalEnsayosResult.rows[0].total)
     
-    // Get failed tests - boolean tests that are false
+    // Get basic failed test counts - simplified approach
     const ensayosBooleanosQuery = 'SELECT COUNT(*) as total FROM resultados_ensayos WHERE resultado_booleano IS NOT NULL'
     const ensayosBooleanosResult = await pool.query(ensayosBooleanosQuery)
     const totalEnsayosBooleanos = parseInt(ensayosBooleanosResult.rows[0].total)
@@ -1340,27 +1340,19 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
     const ensayosFallidosBooleanoResult = await pool.query(ensayosFallidosBooleanoQuery)
     const ensayosFallidosBooleanos = parseInt(ensayosFallidosBooleanoResult.rows[0].total)
     
-    // Get failed tests from numeric results using color rules
+    // Simple count for numeric failures based on existing rules
     const ensayosFallidosNumericosQuery = `
-      SELECT COUNT(DISTINCT re.id_resultado) as total 
+      SELECT COUNT(*) as total 
       FROM resultados_ensayos re
       JOIN reglas_resultados_ensayos r ON re.id_tipo_ensayo = r.id_tipo_ensayo
       WHERE re.resultado_numerico IS NOT NULL
       AND r.resaltado = '#F54927'
-      AND (
-        (r.tipo_condicion = '=' AND re.resultado_numerico = r.valor_numerico_1) OR
-        (r.tipo_condicion = '<>' AND re.resultado_numerico != r.valor_numerico_1) OR
-        (r.tipo_condicion = '>' AND re.resultado_numerico > r.valor_numerico_1) OR
-        (r.tipo_condicion = '<' AND re.resultado_numerico < r.valor_numerico_1) OR
-        (r.tipo_condicion = '>=' AND re.resultado_numerico >= r.valor_numerico_1) OR
-        (r.tipo_condicion = '<=' AND re.resultado_numerico <= r.valor_numerico_1) OR
-        (r.tipo_condicion = 'ENTRE' AND re.resultado_numerico >= r.valor_numerico_1 AND re.resultado_numerico <= r.valor_numerico_2) OR
-        (r.tipo_condicion = 'FUERA_DE' AND (re.resultado_numerico < r.valor_numerico_1 OR re.resultado_numerico > r.valor_numerico_2))
-      )
+      AND re.resultado_numerico < r.valor_numerico_1
     `
     const ensayosFallidosNumericosResult = await pool.query(ensayosFallidosNumericosQuery)
     const ensayosFallidosNumericos = parseInt(ensayosFallidosNumericosResult.rows[0].total || 0)
     
+    const ensayosFallidosTexto = 0 // Por ahora simplificamos
     const ensayosFallidos = ensayosFallidosBooleanos + ensayosFallidosNumericos
     
     // Calculate success rate
@@ -1417,23 +1409,43 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
     const evolucionTemporalResult = await pool.query(evolucionTemporalQuery)
     const evolucionTemporal = evolucionTemporalResult.rows
     
-    // Get most failed test types
+    // Get basic categories from existing rules
+    const resultadosPorCategoriaQuery = `
+      SELECT 
+        COALESCE(r.comentario, 'Sin categoría') as categoria,
+        COUNT(re.id_resultado) as total_ensayos,
+        COUNT(CASE WHEN re.resultado_booleano = false THEN 1 END) as fallidos,
+        'MIXED' as tipo_resultado,
+        r.resaltado
+      FROM reglas_resultados_ensayos r
+      LEFT JOIN resultados_ensayos re ON r.id_tipo_ensayo = re.id_tipo_ensayo
+      GROUP BY r.comentario, r.resaltado
+      HAVING COUNT(re.id_resultado) > 0
+      ORDER BY fallidos DESC
+      LIMIT 5
+    `
+    const resultadosPorCategoriaResult = await pool.query(resultadosPorCategoriaQuery)
+    const resultadosPorCategoria = resultadosPorCategoriaResult.rows
+
+    // Get simple most failed test types
     const tiposEnsayoMasFallidosQuery = `
       SELECT 
         te.nombre_ensayo,
         te.tipo_resultado,
+        'General' as categoria,
         COUNT(re.id_resultado) as total_ensayos,
-        SUM(CASE WHEN re.resultado_booleano = false THEN 1 ELSE 0 END) as fallidos_booleanos,
-        ROUND(
-          (SUM(CASE WHEN re.resultado_booleano = false THEN 1 ELSE 0 END)::numeric / 
-          NULLIF(COUNT(CASE WHEN re.resultado_booleano IS NOT NULL THEN 1 END), 0)) * 100, 1
-        ) as porcentaje_fallos
+        COUNT(CASE WHEN re.resultado_booleano = false THEN 1 END) as fallidos,
+        CASE 
+          WHEN COUNT(re.id_resultado) > 0 THEN 
+            ROUND((COUNT(CASE WHEN re.resultado_booleano = false THEN 1 END)::numeric / COUNT(re.id_resultado)) * 100, 1)
+          ELSE 0
+        END as porcentaje_fallos
       FROM tipos_ensayo te
       LEFT JOIN resultados_ensayos re ON te.id_tipo_ensayo = re.id_tipo_ensayo
       WHERE te.tipo_resultado = 'BOOLEANO'
       GROUP BY te.id_tipo_ensayo, te.nombre_ensayo, te.tipo_resultado
       HAVING COUNT(re.id_resultado) > 0
-      ORDER BY fallidos_booleanos DESC, porcentaje_fallos DESC
+      ORDER BY fallidos DESC, porcentaje_fallos DESC
       LIMIT 5
     `
     const tiposEnsayoMasFallidosResult = await pool.query(tiposEnsayoMasFallidosQuery)
@@ -1444,6 +1456,7 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
       ensayosFallidos,
       ensayosFallidosBooleanos,
       ensayosFallidosNumericos,
+      ensayosFallidosTexto,
       totalEnsayosBooleanos,
       tasaExito,
       mesasInspeccionadas,
@@ -1451,7 +1464,8 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
       ensayosPorTipo,
       ensayosPorTipoResultado,
       evolucionTemporal,
-      tiposEnsayoMasFallidos
+      tiposEnsayoMasFallidos,
+      resultadosPorCategoria
     }
     
     console.log('📈 Real dashboard statistics generated:', {
