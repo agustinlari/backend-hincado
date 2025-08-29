@@ -1331,29 +1331,49 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
     const totalEnsayosResult = await pool.query(totalEnsayosQuery)
     const totalEnsayos = parseInt(totalEnsayosResult.rows[0].total)
     
-    // Get basic failed test counts - simplified approach
-    const ensayosBooleanosQuery = 'SELECT COUNT(*) as total FROM resultados_ensayos WHERE resultado_booleano IS NOT NULL'
-    const ensayosBooleanosResult = await pool.query(ensayosBooleanosQuery)
-    const totalEnsayosBooleanos = parseInt(ensayosBooleanosResult.rows[0].total)
-    
-    const ensayosFallidosBooleanoQuery = 'SELECT COUNT(*) as total FROM resultados_ensayos WHERE resultado_booleano = false'
-    const ensayosFallidosBooleanoResult = await pool.query(ensayosFallidosBooleanoQuery)
-    const ensayosFallidosBooleanos = parseInt(ensayosFallidosBooleanoResult.rows[0].total)
-    
-    // Simple count for numeric failures based on existing rules
-    const ensayosFallidosNumericosQuery = `
-      SELECT COUNT(*) as total 
+    // Get failed tests using comentario field (OK = correcto, NOK = fallido)
+    const ensayosFallidosQuery = `
+      SELECT 
+        COUNT(CASE WHEN te.tipo_resultado = 'BOOLEANO' THEN 1 END) as total_booleanos,
+        COUNT(CASE WHEN te.tipo_resultado = 'NUMERICO' THEN 1 END) as total_numericos,
+        COUNT(CASE WHEN te.tipo_resultado = 'TEXTO' THEN 1 END) as total_texto,
+        COUNT(CASE WHEN r.comentario = 'NOK' AND te.tipo_resultado = 'BOOLEANO' THEN 1 END) as fallidos_booleanos,
+        COUNT(CASE WHEN r.comentario = 'NOK' AND te.tipo_resultado = 'NUMERICO' THEN 1 END) as fallidos_numericos,
+        COUNT(CASE WHEN r.comentario = 'NOK' AND te.tipo_resultado = 'TEXTO' THEN 1 END) as fallidos_texto,
+        COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END) as total_fallidos
       FROM resultados_ensayos re
-      JOIN reglas_resultados_ensayos r ON re.id_tipo_ensayo = r.id_tipo_ensayo
-      WHERE re.resultado_numerico IS NOT NULL
-      AND r.resaltado = '#F54927'
-      AND re.resultado_numerico < r.valor_numerico_1
+      JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+      LEFT JOIN reglas_resultados_ensayos r ON re.id_tipo_ensayo = r.id_tipo_ensayo
+      WHERE (
+        (te.tipo_resultado = 'BOOLEANO' AND (
+          (r.valor_booleano IS NOT NULL AND re.resultado_booleano = r.valor_booleano) OR
+          (r.valor_booleano IS NULL AND re.resultado_booleano = false)
+        )) OR
+        (te.tipo_resultado = 'NUMERICO' AND re.resultado_numerico IS NOT NULL AND (
+          (r.tipo_condicion = '=' AND re.resultado_numerico = r.valor_numerico_1) OR
+          (r.tipo_condicion = '<>' AND re.resultado_numerico != r.valor_numerico_1) OR
+          (r.tipo_condicion = '>' AND re.resultado_numerico > r.valor_numerico_1) OR
+          (r.tipo_condicion = '<' AND re.resultado_numerico < r.valor_numerico_1) OR
+          (r.tipo_condicion = '>=' AND re.resultado_numerico >= r.valor_numerico_1) OR
+          (r.tipo_condicion = '<=' AND re.resultado_numerico <= r.valor_numerico_1) OR
+          (r.tipo_condicion = 'ENTRE' AND re.resultado_numerico >= r.valor_numerico_1 AND re.resultado_numerico <= r.valor_numerico_2) OR
+          (r.tipo_condicion = 'FUERA_DE' AND (re.resultado_numerico < r.valor_numerico_1 OR re.resultado_numerico > r.valor_numerico_2))
+        )) OR
+        (te.tipo_resultado = 'TEXTO' AND re.resultado_texto IS NOT NULL AND (
+          (r.tipo_condicion = '=' AND re.resultado_texto = r.valor_texto) OR
+          (r.tipo_condicion = '<>' AND re.resultado_texto != r.valor_texto)
+        ))
+      )
     `
-    const ensayosFallidosNumericosResult = await pool.query(ensayosFallidosNumericosQuery)
-    const ensayosFallidosNumericos = parseInt(ensayosFallidosNumericosResult.rows[0].total || 0)
     
-    const ensayosFallidosTexto = 0 // Por ahora simplificamos
-    const ensayosFallidos = ensayosFallidosBooleanos + ensayosFallidosNumericos
+    const ensayosFallidosResult = await pool.query(ensayosFallidosQuery)
+    const fallosData = ensayosFallidosResult.rows[0]
+    
+    const totalEnsayosBooleanos = parseInt(fallosData.total_booleanos || 0)
+    const ensayosFallidosBooleanos = parseInt(fallosData.fallidos_booleanos || 0)
+    const ensayosFallidosNumericos = parseInt(fallosData.fallidos_numericos || 0)
+    const ensayosFallidosTexto = parseInt(fallosData.fallidos_texto || 0)
+    const ensayosFallidos = parseInt(fallosData.total_fallidos || 0)
     
     // Calculate success rate
     const tasaExito = totalEnsayos > 0 ? Math.round(((totalEnsayos - ensayosFallidos) / totalEnsayos) * 100 * 10) / 10 : 100
@@ -1381,72 +1401,87 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
     const ensayosPorTipoResult = await pool.query(ensayosPorTipoQuery)
     const ensayosPorTipo = ensayosPorTipoResult.rows
     
-    // Get results by test result type
+    // Get results by test result type using NOK comentario
     const ensayosPorTipoResultadoQuery = `
       SELECT 
         te.tipo_resultado as tipo,
         COUNT(re.id_resultado) as cantidad,
-        SUM(CASE WHEN re.resultado_booleano = false THEN 1 ELSE 0 END) as fallidos_booleanos
+        COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END) as fallidos_booleanos
       FROM resultados_ensayos re
       JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+      LEFT JOIN reglas_resultados_ensayos r ON re.id_tipo_ensayo = r.id_tipo_ensayo
       GROUP BY te.tipo_resultado
       ORDER BY cantidad DESC
     `
     const ensayosPorTipoResultadoResult = await pool.query(ensayosPorTipoResultadoQuery)
     const ensayosPorTipoResultado = ensayosPorTipoResultadoResult.rows
     
-    // Get temporal evolution (last 12 months)
+    // Get temporal evolution (last 12 months) using NOK comentario
     const evolucionTemporalQuery = `
       SELECT 
-        TO_CHAR(fecha_medicion, 'YYYY-MM') as fecha,
-        COUNT(id_resultado) as cantidad,
-        SUM(CASE WHEN resultado_booleano = false THEN 1 ELSE 0 END) as fallidos
-      FROM resultados_ensayos
-      WHERE fecha_medicion >= CURRENT_DATE - INTERVAL '12 months'
-      GROUP BY TO_CHAR(fecha_medicion, 'YYYY-MM')
+        TO_CHAR(re.fecha_medicion, 'YYYY-MM') as fecha,
+        COUNT(re.id_resultado) as cantidad,
+        COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END) as fallidos
+      FROM resultados_ensayos re
+      LEFT JOIN reglas_resultados_ensayos r ON re.id_tipo_ensayo = r.id_tipo_ensayo
+      WHERE re.fecha_medicion >= CURRENT_DATE - INTERVAL '12 months'
+      GROUP BY TO_CHAR(re.fecha_medicion, 'YYYY-MM')
       ORDER BY fecha
     `
     const evolucionTemporalResult = await pool.query(evolucionTemporalQuery)
     const evolucionTemporal = evolucionTemporalResult.rows
     
-    // Get basic categories from existing rules
+    // Get categories showing OK vs NOK results
     const resultadosPorCategoriaQuery = `
       SELECT 
-        COALESCE(r.comentario, 'Sin categoría') as categoria,
+        CASE 
+          WHEN r.comentario = 'OK' THEN 'Resultados Correctos'
+          WHEN r.comentario = 'NOK' THEN 'Resultados Fallidos'
+          ELSE COALESCE(r.comentario, 'Sin categoría')
+        END as categoria,
+        te.tipo_resultado,
         COUNT(re.id_resultado) as total_ensayos,
-        COUNT(CASE WHEN re.resultado_booleano = false THEN 1 END) as fallidos,
-        'MIXED' as tipo_resultado,
-        r.resaltado
+        COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END) as fallidos,
+        CASE WHEN r.comentario = 'NOK' THEN '#F54927' ELSE '#10b981' END as resaltado
       FROM reglas_resultados_ensayos r
       LEFT JOIN resultados_ensayos re ON r.id_tipo_ensayo = re.id_tipo_ensayo
-      GROUP BY r.comentario, r.resaltado
+      LEFT JOIN tipos_ensayo te ON r.id_tipo_ensayo = te.id_tipo_ensayo
+      WHERE r.comentario IN ('OK', 'NOK')
+      GROUP BY r.comentario, te.tipo_resultado
       HAVING COUNT(re.id_resultado) > 0
-      ORDER BY fallidos DESC
-      LIMIT 5
+      ORDER BY 
+        CASE WHEN r.comentario = 'NOK' THEN 0 ELSE 1 END,
+        fallidos DESC
+      LIMIT 8
     `
     const resultadosPorCategoriaResult = await pool.query(resultadosPorCategoriaQuery)
     const resultadosPorCategoria = resultadosPorCategoriaResult.rows
 
-    // Get simple most failed test types
+    // Get most failed test types using NOK comentario
     const tiposEnsayoMasFallidosQuery = `
       SELECT 
         te.nombre_ensayo,
         te.tipo_resultado,
-        'General' as categoria,
+        CASE 
+          WHEN r.comentario = 'NOK' THEN 'Fallidos'
+          WHEN r.comentario = 'OK' THEN 'Correctos'
+          ELSE 'General'
+        END as categoria,
         COUNT(re.id_resultado) as total_ensayos,
-        COUNT(CASE WHEN re.resultado_booleano = false THEN 1 END) as fallidos,
+        COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END) as fallidos,
         CASE 
           WHEN COUNT(re.id_resultado) > 0 THEN 
-            ROUND((COUNT(CASE WHEN re.resultado_booleano = false THEN 1 END)::numeric / COUNT(re.id_resultado)) * 100, 1)
+            ROUND((COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END)::numeric / COUNT(re.id_resultado)) * 100, 1)
           ELSE 0
         END as porcentaje_fallos
       FROM tipos_ensayo te
       LEFT JOIN resultados_ensayos re ON te.id_tipo_ensayo = re.id_tipo_ensayo
-      WHERE te.tipo_resultado = 'BOOLEANO'
-      GROUP BY te.id_tipo_ensayo, te.nombre_ensayo, te.tipo_resultado
+      LEFT JOIN reglas_resultados_ensayos r ON te.id_tipo_ensayo = r.id_tipo_ensayo
+      WHERE r.comentario = 'NOK'
+      GROUP BY te.id_tipo_ensayo, te.nombre_ensayo, te.tipo_resultado, r.comentario
       HAVING COUNT(re.id_resultado) > 0
       ORDER BY fallidos DESC, porcentaje_fallos DESC
-      LIMIT 5
+      LIMIT 8
     `
     const tiposEnsayoMasFallidosResult = await pool.query(tiposEnsayoMasFallidosQuery)
     const tiposEnsayoMasFallidos = tiposEnsayoMasFallidosResult.rows
