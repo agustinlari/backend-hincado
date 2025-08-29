@@ -396,11 +396,12 @@ app.get('/api/mesas/:id/components', authMiddleware, async (c) => {
         pc.tipo_elemento,
         pc.coord_x,
         pc.coord_y,
-        pc.descripcion_punto_montaje
+        pc.descripcion_punto_montaje,
+        pc.orden_prioridad
       FROM mesas m
       JOIN plantilla_componentes pc ON m.id_plantilla = pc.id_plantilla
       WHERE m.id_mesa = $1
-      ORDER BY pc.tipo_elemento, pc.coord_x, pc.coord_y
+      ORDER BY pc.orden_prioridad ASC, pc.tipo_elemento, pc.coord_x, pc.coord_y
     `
     const result = await pool.query(query, [id])
     console.log(`✅ Found ${result.rows.length} components for mesa ${id}`)
@@ -527,9 +528,10 @@ app.get('/api/tipos-ensayo', authMiddleware, async (c) => {
         grupo_ensayo,
         tipo_resultado,
         minimo_admisible,
-        maximo_admisible
+        maximo_admisible,
+        orden_prioridad
       FROM tipos_ensayo
-      ORDER BY grupo_ensayo, nombre_ensayo
+      ORDER BY orden_prioridad ASC, grupo_ensayo, nombre_ensayo
     `
     const result = await pool.query(query)
     return c.json(result.rows)
@@ -1079,7 +1081,7 @@ app.get('/api/components', authMiddleware, async (c) => {
       JOIN mesas m ON m.id_plantilla = mp.id_plantilla
       JOIN cts ct ON m.id_ct = ct.id_ct
       WHERE pc.tipo_elemento = 'PUNTO_MONTAJE'
-      ORDER BY ct.nombre_ct, m.nombre_mesa, pc.id_componente
+      ORDER BY ct.nombre_ct, m.nombre_mesa, pc.orden_prioridad ASC, pc.id_componente
     `
     
     const result = await pool.query(query)
@@ -1124,7 +1126,7 @@ app.get('/api/components/test-results/latest', authMiddleware, async (c) => {
       FROM latest_results lr
       INNER JOIN tipos_ensayo te ON lr.id_tipo_ensayo = te.id_tipo_ensayo
       WHERE lr.rn = 1
-      ORDER BY lr.id_mesa, lr.id_componente_plantilla_1, te.grupo_ensayo, te.nombre_ensayo
+      ORDER BY lr.id_mesa, lr.id_componente_plantilla_1, te.orden_prioridad ASC, te.grupo_ensayo, te.nombre_ensayo
     `
     
     const result = await pool.query(query)
@@ -1226,7 +1228,7 @@ app.get('/api/resultados-ensayos/latest', authMiddleware, async (c) => {
       FROM latest_results lr
       INNER JOIN tipos_ensayo te ON lr.id_tipo_ensayo = te.id_tipo_ensayo
       WHERE lr.rn = 1
-      ORDER BY lr.id_mesa, te.grupo_ensayo, te.nombre_ensayo
+      ORDER BY lr.id_mesa, te.orden_prioridad ASC, te.grupo_ensayo, te.nombre_ensayo
     `
     
     const result = await pool.query(query)
