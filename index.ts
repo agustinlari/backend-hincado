@@ -374,6 +374,44 @@ const exportAuthMiddleware = async (c: any, next: any) => {
   }
 }
 
+// ================================
+// EXPORT ENDPOINTS FOR POWER QUERY (must come before other endpoints)
+// ================================
+
+// Export inspecciones table
+app.get('/api/export/inspecciones', exportAuthMiddleware, async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM inspecciones 
+      ORDER BY fecha_inicio DESC
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting inspecciones:', error)
+    return c.json({ 
+      error: 'Failed to export inspecciones',
+      details: error.message 
+    }, 500)
+  }
+})
+
+// Export inspecciones table (alternative endpoint to avoid route conflicts)
+app.get('/api/export/inspecciones-data', exportAuthMiddleware, async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM inspecciones 
+      ORDER BY fecha_inicio DESC
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting inspecciones data:', error)
+    return c.json({ 
+      error: 'Failed to export inspecciones data',
+      details: error.message 
+    }, 500)
+  }
+})
+
 // Get all mesas with their CT and plantilla info
 app.get('/api/mesas', authMiddleware, async (c) => {
   try {
@@ -1710,27 +1748,7 @@ app.get('/api/inspecciones/:id/report-data', authMiddleware, async (c) => {
   }
 })
 
-// ================================
-// EXPORT ENDPOINTS FOR POWER QUERY
-// ================================
-
-// Export inspecciones table
-app.get('/api/export/inspecciones', exportAuthMiddleware, async (c) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        i.*,
-        u.username as usuario_nombre
-      FROM inspecciones i
-      LEFT JOIN usuarios u ON i.id_usuario = u.id
-      ORDER BY i.fecha_inicio DESC
-    `)
-    return c.json(result.rows)
-  } catch (error) {
-    console.error('Error exporting inspecciones:', error)
-    return c.json({ error: 'Failed to export inspecciones' }, 500)
-  }
-})
+// Continue with other export endpoints
 
 // Export mesas table
 app.get('/api/export/mesas', exportAuthMiddleware, async (c) => {
