@@ -499,6 +499,39 @@ async function generatePDFAsync(jobId: string, inspectionId: string) {
     
     console.log(`📄 HTML generation for job ${jobId}, mesas: ${reportData.mesas.length}`)
     
+    // Debug: Verify data matches ReportView format
+    let totalComponents = 0;
+    let totalResults = 0;
+    let falseCount = 0;
+    let trueCount = 0;
+    
+    reportData.mesas.forEach(mesa => {
+      totalComponents += mesa.components?.length || 0;
+      totalResults += mesa.results?.length || 0;
+      
+      mesa.results?.forEach(result => {
+        if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
+          if (result.resultado_booleano === false || result.resultado_booleano === 'false' || result.resultado_booleano === 0) {
+            falseCount++;
+          } else if (result.resultado_booleano === true || result.resultado_booleano === 'true' || result.resultado_booleano === 1) {
+            trueCount++;
+          }
+        }
+      });
+    });
+    
+    console.log(`[PDF-REPORTVIEW] Total: ${totalComponents} components, ${totalResults} results, ${trueCount} true, ${falseCount} false`);
+    
+    // Sample data from first mesa
+    if (reportData.mesas.length > 0) {
+      const firstMesa = reportData.mesas[0];
+      console.log(`[PDF-REPORTVIEW] First mesa sample:`, {
+        mesa_id: firstMesa.id_mesa,
+        components_sample: firstMesa.components?.slice(0, 2).map(c => ({id: c.id_componente, type: c.tipo_elemento})),
+        results_sample: firstMesa.results?.slice(0, 2).map(r => ({comp: r.id_componente_plantilla_1, test: r.id_tipo_ensayo, bool: r.resultado_booleano}))
+      });
+    }
+    
     // Generate HTML
     const htmlContent = generateReportHTML(reportData)
     
@@ -2238,11 +2271,16 @@ async function generateReportData(inspectionId: string) {
     const colorRulesResult = await pool.query(colorRulesQuery)
     const colorRules = colorRulesResult.rows
     
-    // Optimized: Get all components and results in batch queries instead of individual queries per mesa
+    // Use ReportView logic but optimized for batch processing
+    console.log(`[PDF-DATA] Using ReportView-compatible logic for ${mesas.length} mesas...`)
+    
+    // Use the exact same logic as the working /api/mesas/:id/components endpoint
     const allMesaIds = mesas.map(m => m.id_mesa)
     
-    // Get all components for all mesas in one query
-    const allComponentsQuery = `
+    console.log(`[PDF-DATA] Mesa IDs:`, allMesaIds)
+    
+    // Get all components using the same JOIN as the working endpoint
+    const componentsQuery = `
       SELECT 
         m.id_mesa,
         pc.id_componente,
@@ -2257,44 +2295,83 @@ async function generateReportData(inspectionId: string) {
       ORDER BY m.id_mesa, pc.orden_prioridad ASC, pc.tipo_elemento, pc.coord_x, pc.coord_y
     `
     
-    const allComponentsResult = await pool.query(allComponentsQuery, [allMesaIds])
+    console.log(`[PDF-DATA] Using working endpoint logic for components`)
     
-    // Get all results for all mesas in one query
-    const allResultsQuery = `
+    const componentsResult = await pool.query(componentsQuery, [allMesaIds])
+    
+    console.log(`[PDF-DATA] Components query returned:`, componentsResult.rows.length, 'rows')
+    if (componentsResult.rows.length === 0) {
+      console.log(`[PDF-DATA] ⚠️ No components found! Debugging...`)
+      // Test the working endpoint logic for first mesa
+      if (allMesaIds.length > 0) {
+        const testQuery = `
+          SELECT m.id_mesa, m.id_plantilla, pc.id_componente
+          FROM mesas m
+          LEFT JOIN plantilla_componentes pc ON m.id_plantilla = pc.id_plantilla
+          WHERE m.id_mesa = $1
+        `
+        const testResult = await pool.query(testQuery, [allMesaIds[0]])
+        console.log(`[PDF-DATA] Test query for mesa ${allMesaIds[0]}:`, testResult.rows)
+      }
+    }
+    
+    // Get latest test results for all mesas (ReportView logic)
+    const resultsQuery = `
+      WITH latest_results AS (
+        SELECT 
+          re.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY re.id_mesa, re.id_componente_plantilla_1, re.id_tipo_ensayo 
+            ORDER BY re.fecha_medicion DESC, re.id_resultado DESC
+          ) as rn
+        FROM resultados_ensayos re
+        WHERE re.id_mesa = ANY($1) AND re.id_inspeccion = $2
+      )
       SELECT 
-        re.id_mesa,
-        re.id_tipo_ensayo,
-        re.id_componente_plantilla_1,
-        re.resultado_numerico,
-        re.resultado_booleano,
-        re.resultado_texto,
-        re.comentario
-      FROM resultados_ensayos re
-      WHERE re.id_mesa = ANY($1) AND re.id_inspeccion = $2
+        lr.id_tipo_ensayo,
+        lr.id_componente_plantilla_1,
+        lr.id_mesa,
+        lr.resultado_numerico,
+        lr.resultado_booleano,
+        lr.resultado_texto,
+        lr.comentario,
+        lr.fecha_medicion
+      FROM latest_results lr
+      WHERE lr.rn = 1
     `
     
-    const allResultsResult = await pool.query(allResultsQuery, [allMesaIds, inspectionId])
+    const resultsResult = await pool.query(resultsQuery, [allMesaIds, inspectionId])
     
-    // Group components and results by mesa_id
-    const componentsByMesa = {}
+    // Group components by plantilla and results by mesa
+    const componentsByPlantilla = {}
     const resultsByMesa = {}
     
-    allComponentsResult.rows.forEach(comp => {
-      if (!componentsByMesa[comp.id_mesa]) componentsByMesa[comp.id_mesa] = []
-      componentsByMesa[comp.id_mesa].push(comp)
+    componentsResult.rows.forEach(comp => {
+      if (!componentsByPlantilla[comp.id_plantilla]) componentsByPlantilla[comp.id_plantilla] = []
+      componentsByPlantilla[comp.id_plantilla].push(comp)
     })
     
-    allResultsResult.rows.forEach(result => {
+    resultsResult.rows.forEach(result => {
       if (!resultsByMesa[result.id_mesa]) resultsByMesa[result.id_mesa] = []
       resultsByMesa[result.id_mesa].push(result)
     })
     
+    console.log(`[PDF-DATA] Loaded ${componentsResult.rows.length} components from ${Object.keys(componentsByPlantilla).length} plantillas`)
+    console.log(`[PDF-DATA] Loaded ${resultsResult.rows.length} results from ${allMesaIds.length} mesas`)
+    
     // Build final mesa data structure
-    const mesasWithData = mesas.map(mesa => ({
-      ...mesa,
-      components: componentsByMesa[mesa.id_mesa] || [],
-      results: resultsByMesa[mesa.id_mesa] || []
-    }))
+    const mesasWithData = mesas.map(mesa => {
+      const components = componentsByPlantilla[mesa.id_plantilla] || []
+      const results = resultsByMesa[mesa.id_mesa] || []
+      
+      console.log(`[PDF-DATA] Mesa ${mesa.id_mesa}: ${components.length} components, ${results.length} results`)
+      
+      return {
+        ...mesa,
+        components,
+        results
+      }
+    })
     
     return {
       inspection,
@@ -2329,9 +2406,19 @@ function evaluateRule(rule: any, result: any): boolean {
   const num1 = valor_numerico_1 !== null ? parseFloat(valor_numerico_1) : null;
   const num2 = valor_numerico_2 !== null ? parseFloat(valor_numerico_2) : null;
   
-  // Debug for boolean evaluation
+  // Enhanced debug for boolean rule evaluation with explicit conversion
   if (typeof resultValue === 'boolean') {
-    console.log(`Evaluating boolean rule: ${tipo_condicion}, result: ${resultValue}, rule_value: ${valor_booleano}`);
+    console.log(`[PDF-RULE] Evaluating boolean: result=${resultValue} ${tipo_condicion} rule_value=${valor_booleano}`);
+    
+    // Explicit comparison for debugging
+    let ruleMatch = false;
+    if (tipo_condicion === '=') {
+      ruleMatch = resultValue === valor_booleano;
+    } else if (tipo_condicion === '<>') {
+      ruleMatch = resultValue !== valor_booleano;
+    }
+    
+    console.log(`[PDF-RULE] Match result: ${ruleMatch} (${resultValue} ${tipo_condicion} ${valor_booleano})`);
   }
   
   switch (tipo_condicion) {
@@ -2395,11 +2482,12 @@ function getCellBackgroundColor(component: any, tipoEnsayo: any, results: any[],
   
   applicableRules.sort((a, b) => a.prioridad - b.prioridad);
   
-  // Debug for boolean results
+  // Enhanced debug for boolean color rules
   if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
-    console.log(`Color evaluation for boolean component ${component.id_componente}, test ${tipoEnsayo.id_tipo_ensayo}:`);
-    console.log('Result value:', result.resultado_booleano);
-    console.log('Applicable rules:', applicableRules.length);
+    console.log(`[PDF-COLOR] Component ${component.id_componente}, Test ${tipoEnsayo.id_tipo_ensayo}: value=${result.resultado_booleano} (${typeof result.resultado_booleano}), rules=${applicableRules.length}`);
+    applicableRules.forEach((rule, index) => {
+      console.log(`  Rule ${index}: condition=${rule.tipo_condicion}, rule_bool=${rule.valor_booleano}, color=${rule.resaltado}`);
+    });
   }
   
   for (const rule of applicableRules) {
@@ -2407,7 +2495,7 @@ function getCellBackgroundColor(component: any, tipoEnsayo: any, results: any[],
     
     if (ruleMatches) {
       const colorHex = rule.resaltado.startsWith('#') ? rule.resaltado : `#${rule.resaltado}`;
-      console.log(`Rule matched for component ${component.id_componente}: ${colorHex}`);
+      console.log(`[PDF-COLOR] ✅ Rule matched for component ${component.id_componente}: ${colorHex}`);
       return colorHex;
     }
   }
@@ -2421,7 +2509,9 @@ function formatTestResult(component: any, tipoEnsayo: any, results: any[]): stri
     r.id_tipo_ensayo === tipoEnsayo.id_tipo_ensayo
   );
   
+  // Simplified debug - only log when no match found
   if (!result) {
+    console.log(`[PDF-MATCH] No result for component ${component.id_componente}, test ${tipoEnsayo.id_tipo_ensayo}`);
     return '-';
   }
   
@@ -2429,9 +2519,19 @@ function formatTestResult(component: any, tipoEnsayo: any, results: any[]): stri
   if (result.resultado_numerico !== null && result.resultado_numerico !== undefined) {
     value = `${result.resultado_numerico}${tipoEnsayo.unidad_medida ? ' ' + tipoEnsayo.unidad_medida : ''}`;
   } else if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
-    // Debugging: log boolean result conversion
-    console.log(`Boolean result for component ${component.id_componente}, test ${tipoEnsayo.id_tipo_ensayo}:`, result.resultado_booleano, 'converted to:', result.resultado_booleano ? '✅' : '❌');
-    value = result.resultado_booleano ? '✅' : '❌';
+    // Explicit boolean conversion and debug
+    let boolValue;
+    if (result.resultado_booleano === true || result.resultado_booleano === 'true' || result.resultado_booleano === 1) {
+      boolValue = true;
+    } else if (result.resultado_booleano === false || result.resultado_booleano === 'false' || result.resultado_booleano === 0) {
+      boolValue = false;
+    } else {
+      boolValue = Boolean(result.resultado_booleano);
+    }
+    
+    const icon = boolValue ? '✅' : '❌';
+    console.log(`[PDF-BOOL] Component ${component.id_componente}, Test ${tipoEnsayo.nombre_ensayo}: DB=${result.resultado_booleano}(${typeof result.resultado_booleano}) -> ${boolValue} -> ${icon}`);
+    value = icon;
   } else if (result.resultado_texto) {
     value = result.resultado_texto;
   }
@@ -2582,7 +2682,10 @@ function generateReportHTML(reportData: any) {
               </tbody>
             </table>
           ` : `
-            <p class="no-results">No se encontraron datos para esta mesa.</p>
+            <div class="no-results">
+              <p>No se encontraron datos para esta mesa.</p>
+              <p><small>Componentes: ${mesa.components?.length || 0}, Tipos ensayo: ${tiposEnsayo?.length || 0}</small></p>
+            </div>
           `}
 
         </div>
@@ -2617,18 +2720,29 @@ function getPDFStyles() {
       box-sizing: border-box;
     }
     
+    @page {
+      size: A4;
+      margin: 15mm;
+    }
+    
+    @page landscape {
+      size: A4 landscape;
+      margin: 15mm;
+    }
+    
     .mesa-report-page {
       width: 100%;
-      min-height: 100vh;
-      page-break-before: always;
-      page-break-after: avoid;
+      min-height: calc(100vh - 30mm);
+      page-break-after: always;
       page-break-inside: avoid;
-      padding: 15mm;
+      padding: 10mm;
       margin: 0;
       box-sizing: border-box;
-      transform: rotate(90deg) scale(0.7);
-      transform-origin: center;
-      position: relative;
+      page: landscape;
+    }
+    
+    .mesa-report-page:last-child {
+      page-break-after: avoid;
     }
     
     .mesa-report-page:last-child {
@@ -2731,12 +2845,11 @@ function getPDFStyles() {
     }
     
     .mesa-results-table {
-      width: 140%;
+      width: 100%;
       border-collapse: collapse;
-      font-size: 10px;
+      font-size: 9px;
       margin-top: 5px;
       table-layout: fixed;
-      max-width: none;
     }
     
     .mesa-results-table th,
@@ -2758,35 +2871,41 @@ function getPDFStyles() {
     
     .mesa-results-table .component-header {
       text-align: left !important;
-      width: 15%;
+      width: 120px;
+      min-width: 120px;
     }
     
     .mesa-results-table .component-cell {
       text-align: left !important;
-      font-size: 9px;
-      width: 15%;
+      font-size: 8px;
+      width: 120px;
+      min-width: 120px;
     }
     
     .mesa-results-table .coordinates-header {
-      width: 10%;
+      width: 60px;
+      min-width: 60px;
     }
     
     .mesa-results-table .coordinates-cell {
-      font-size: 8px;
+      font-size: 7px;
       color: #666;
-      width: 10%;
+      width: 60px;
+      min-width: 60px;
     }
     
     .mesa-results-table .test-header {
-      width: 8%;
-      font-size: 8px;
+      width: 45px;
+      min-width: 45px;
+      font-size: 7px;
       line-height: 1.1;
     }
     
     .mesa-results-table .result-cell {
-      font-size: 9px;
+      font-size: 8px;
       font-weight: normal;
-      width: 8%;
+      width: 45px;
+      min-width: 45px;
     }
     
     .component-icon {
