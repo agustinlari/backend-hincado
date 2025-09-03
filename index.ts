@@ -413,18 +413,91 @@ app.get('/api/export/inspecciones-data', exportAuthMiddleware, async (c) => {
   }
 })
 
-// Generate PDF report for inspection
-app.post('/api/reports/pdf/:inspectionId', authMiddleware, async (c) => {
+// In-memory store for PDF generation jobs
+const pdfJobs = new Map<string, {
+  status: 'pending' | 'processing' | 'completed' | 'error',
+  result?: Buffer,
+  error?: string,
+  startTime: Date
+}>()
+
+// Start PDF generation (async)
+app.post('/api/reports/pdf/:inspectionId/start', authMiddleware, async (c) => {
   const inspectionId = c.req.param('inspectionId')
+  const jobId = `pdf-${inspectionId}-${Date.now()}`
   
+  // Create job entry
+  pdfJobs.set(jobId, {
+    status: 'pending',
+    startTime: new Date()
+  })
+  
+  // Start async generation
+  generatePDFAsync(jobId, inspectionId)
+  
+  return c.json({ jobId, status: 'pending' })
+})
+
+// Check PDF generation status
+app.get('/api/reports/pdf/status/:jobId', authMiddleware, async (c) => {
+  const jobId = c.req.param('jobId')
+  const job = pdfJobs.get(jobId)
+  
+  if (!job) {
+    return c.json({ error: 'Job not found' }, 404)
+  }
+  
+  return c.json({
+    status: job.status,
+    startTime: job.startTime,
+    error: job.error
+  })
+})
+
+// Download completed PDF
+app.get('/api/reports/pdf/download/:jobId', authMiddleware, async (c) => {
+  const jobId = c.req.param('jobId')
+  const job = pdfJobs.get(jobId)
+  
+  if (!job) {
+    return c.json({ error: 'Job not found' }, 404)
+  }
+  
+  if (job.status !== 'completed') {
+    return c.json({ error: 'PDF not ready yet', status: job.status }, 400)
+  }
+  
+  if (!job.result) {
+    return c.json({ error: 'PDF result not available' }, 500)
+  }
+  
+  // Clean up job after successful download
+  pdfJobs.delete(jobId)
+  
+  const inspectionId = jobId.split('-')[1]
+  c.header('Content-Type', 'application/pdf')
+  c.header('Content-Disposition', `attachment; filename="informe-inspeccion-${inspectionId}.pdf"`)
+  return c.body(job.result)
+})
+
+// Async PDF generation function
+async function generatePDFAsync(jobId: string, inspectionId: string) {
   try {
-    console.log(`🔍 Generating PDF for inspection ${inspectionId}`)
+    console.log(`🔍 Starting async PDF generation for inspection ${inspectionId}, job ${jobId}`)
+    
+    // Update job status
+    const job = pdfJobs.get(jobId)
+    if (job) {
+      job.status = 'processing'
+    }
     
     // Get report data
     const reportData = await generateReportData(inspectionId)
     if (!reportData) {
-      return c.json({ error: 'Inspection not found or no data available' }, 404)
+      throw new Error('Inspection not found or no data available')
     }
+    
+    console.log(`📄 HTML generation for job ${jobId}, mesas: ${reportData.mesas.length}`)
     
     // Generate HTML
     const htmlContent = generateReportHTML(reportData)
@@ -435,58 +508,88 @@ app.post('/api/reports/pdf/:inspectionId', authMiddleware, async (c) => {
       args: [
         '--no-sandbox', 
         '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage', // Overcome limited resource problems
+        '--disable-dev-shm-usage',
         '--disable-gpu',
         '--disable-web-security',
         '--disable-features=TranslateUI',
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--memory-pressure-off'
+        '--memory-pressure-off',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--max_old_space_size=8192'
       ]
     })
     
     const page = await browser.newPage()
     
-    // Set longer timeout for large documents
-    page.setDefaultNavigationTimeout(120000) // 2 minutes
-    page.setDefaultTimeout(120000) // 2 minutes
+    // Set very long timeouts for large documents
+    page.setDefaultNavigationTimeout(3600000) // 60 minutes
+    page.setDefaultTimeout(3600000) // 60 minutes
+    
+    // Optimize memory usage
+    await page.evaluateOnNewDocument(() => {
+      window.requestIdleCallback = window.requestIdleCallback || function(cb) { return setTimeout(cb, 1) }
+    })
+    
+    console.log(`🌐 Setting HTML content for job ${jobId}...`)
     
     // Set content with optimized settings
     await page.setContent(htmlContent, { 
-      waitUntil: 'domcontentloaded', // Faster than networkidle0 for large content
-      timeout: 120000 // 2 minutes timeout
+      waitUntil: 'domcontentloaded',
+      timeout: 3600000 // 60 minutes
     })
+    
+    console.log(`🖨️ Generating PDF for job ${jobId}...`)
     
     // Generate PDF with optimizations for large documents
     const pdfBuffer = await page.pdf({
       format: 'A4',
       landscape: false,
       printBackground: true,
-      margin: { top: '15mm', bottom: '15mm', left: '15mm', right: '15mm' },
+      margin: { top: '10mm', bottom: '10mm', left: '10mm', right: '10mm' },
       displayHeaderFooter: false,
-      preferCSSPageSize: true,
-      timeout: 300000 // 5 minutes for PDF generation
+      preferCSSPageSize: false,
+      timeout: 7200000 // 120 minutes for PDF generation
     })
     
     await browser.close()
     
-    console.log(`✅ PDF generated successfully for inspection ${inspectionId}`)
+    console.log(`✅ PDF generated successfully for job ${jobId}, size: ${pdfBuffer.length} bytes`)
     
-    // Return PDF
-    c.header('Content-Type', 'application/pdf')
-    c.header('Content-Disposition', `attachment; filename="informe-inspeccion-${inspectionId}.pdf"`)
-    
-    return c.body(pdfBuffer)
+    // Update job with result
+    const finalJob = pdfJobs.get(jobId)
+    if (finalJob) {
+      finalJob.status = 'completed'
+      finalJob.result = pdfBuffer
+    }
     
   } catch (error) {
-    console.error('Error generating PDF:', error)
-    return c.json({ 
-      error: 'Failed to generate PDF report',
-      details: error.message 
-    }, 500)
+    console.error(`❌ Error generating PDF for job ${jobId}:`, error)
+    
+    // Update job with error
+    const job = pdfJobs.get(jobId)
+    if (job) {
+      job.status = 'error'
+      job.error = error instanceof Error ? error.message : 'Unknown error'
+    }
   }
-})
+}
+
+// Clean up old jobs periodically (every 30 minutes)
+setInterval(() => {
+  const now = new Date()
+  for (const [jobId, job] of pdfJobs.entries()) {
+    const ageInMinutes = (now.getTime() - job.startTime.getTime()) / (1000 * 60)
+    // Remove jobs older than 2 hours
+    if (ageInMinutes > 120) {
+      pdfJobs.delete(jobId)
+      console.log(`🧹 Cleaned up old PDF job: ${jobId}`)
+    }
+  }
+}, 30 * 60 * 1000)
 
 // Get all mesas with their CT and plantilla info
 app.get('/api/mesas', authMiddleware, async (c) => {
@@ -2226,6 +2329,11 @@ function evaluateRule(rule: any, result: any): boolean {
   const num1 = valor_numerico_1 !== null ? parseFloat(valor_numerico_1) : null;
   const num2 = valor_numerico_2 !== null ? parseFloat(valor_numerico_2) : null;
   
+  // Debug for boolean evaluation
+  if (typeof resultValue === 'boolean') {
+    console.log(`Evaluating boolean rule: ${tipo_condicion}, result: ${resultValue}, rule_value: ${valor_booleano}`);
+  }
+  
   switch (tipo_condicion) {
     case '=':
       if (typeof resultValue === 'number' && num1 !== null) return resultValue === num1;
@@ -2287,11 +2395,19 @@ function getCellBackgroundColor(component: any, tipoEnsayo: any, results: any[],
   
   applicableRules.sort((a, b) => a.prioridad - b.prioridad);
   
+  // Debug for boolean results
+  if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
+    console.log(`Color evaluation for boolean component ${component.id_componente}, test ${tipoEnsayo.id_tipo_ensayo}:`);
+    console.log('Result value:', result.resultado_booleano);
+    console.log('Applicable rules:', applicableRules.length);
+  }
+  
   for (const rule of applicableRules) {
     const ruleMatches = evaluateRule(rule, result);
     
     if (ruleMatches) {
       const colorHex = rule.resaltado.startsWith('#') ? rule.resaltado : `#${rule.resaltado}`;
+      console.log(`Rule matched for component ${component.id_componente}: ${colorHex}`);
       return colorHex;
     }
   }
@@ -2313,6 +2429,8 @@ function formatTestResult(component: any, tipoEnsayo: any, results: any[]): stri
   if (result.resultado_numerico !== null && result.resultado_numerico !== undefined) {
     value = `${result.resultado_numerico}${tipoEnsayo.unidad_medida ? ' ' + tipoEnsayo.unidad_medida : ''}`;
   } else if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
+    // Debugging: log boolean result conversion
+    console.log(`Boolean result for component ${component.id_componente}, test ${tipoEnsayo.id_tipo_ensayo}:`, result.resultado_booleano, 'converted to:', result.resultado_booleano ? '✅' : '❌');
     value = result.resultado_booleano ? '✅' : '❌';
   } else if (result.resultado_texto) {
     value = result.resultado_texto;
@@ -2499,20 +2617,18 @@ function getPDFStyles() {
       box-sizing: border-box;
     }
     
-    @page mesa {
-      size: A4 landscape;
-      margin: 15mm;
-    }
-    
     .mesa-report-page {
       width: 100%;
-      height: 100vh;
-      page-break-after: always;
+      min-height: 100vh;
+      page-break-before: always;
+      page-break-after: avoid;
       page-break-inside: avoid;
-      padding: 0;
+      padding: 15mm;
       margin: 0;
       box-sizing: border-box;
-      page: mesa;
+      transform: rotate(90deg) scale(0.7);
+      transform-origin: center;
+      position: relative;
     }
     
     .mesa-report-page:last-child {
@@ -2615,13 +2731,12 @@ function getPDFStyles() {
     }
     
     .mesa-results-table {
-      width: 100%;
+      width: 140%;
       border-collapse: collapse;
-      font-size: 8px;
+      font-size: 10px;
       margin-top: 5px;
-      table-layout: auto;
-      max-height: calc(100vh - 120mm);
-      overflow: visible;
+      table-layout: fixed;
+      max-width: none;
     }
     
     .mesa-results-table th,
@@ -2643,41 +2758,35 @@ function getPDFStyles() {
     
     .mesa-results-table .component-header {
       text-align: left !important;
-      width: 80px;
-      min-width: 80px;
+      width: 15%;
     }
     
     .mesa-results-table .component-cell {
       text-align: left !important;
-      font-size: 7px;
-      width: 80px;
-      min-width: 80px;
+      font-size: 9px;
+      width: 15%;
     }
     
     .mesa-results-table .coordinates-header {
-      width: 50px;
-      min-width: 50px;
+      width: 10%;
     }
     
     .mesa-results-table .coordinates-cell {
-      font-size: 6px;
+      font-size: 8px;
       color: #666;
-      width: 50px;
-      min-width: 50px;
+      width: 10%;
     }
     
     .mesa-results-table .test-header {
-      width: 40px;
-      min-width: 40px;
-      font-size: 6px;
+      width: 8%;
+      font-size: 8px;
       line-height: 1.1;
     }
     
     .mesa-results-table .result-cell {
-      font-size: 7px;
+      font-size: 9px;
       font-weight: normal;
-      width: 40px;
-      min-width: 40px;
+      width: 8%;
     }
     
     .component-icon {
