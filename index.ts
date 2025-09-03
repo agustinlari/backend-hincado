@@ -429,22 +429,44 @@ app.post('/api/reports/pdf/:inspectionId', authMiddleware, async (c) => {
     // Generate HTML
     const htmlContent = generateReportHTML(reportData)
     
-    // Generate PDF with Puppeteer
+    // Generate PDF with Puppeteer - optimized for large documents
     const browser = await puppeteer.launch({ 
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'] // For server environments
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage', // Overcome limited resource problems
+        '--disable-gpu',
+        '--disable-web-security',
+        '--disable-features=TranslateUI',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--memory-pressure-off'
+      ]
     })
     
     const page = await browser.newPage()
-    await page.setContent(htmlContent, { waitUntil: 'networkidle0' })
     
+    // Set longer timeout for large documents
+    page.setDefaultNavigationTimeout(120000) // 2 minutes
+    page.setDefaultTimeout(120000) // 2 minutes
+    
+    // Set content with optimized settings
+    await page.setContent(htmlContent, { 
+      waitUntil: 'domcontentloaded', // Faster than networkidle0 for large content
+      timeout: 120000 // 2 minutes timeout
+    })
+    
+    // Generate PDF with optimizations for large documents
     const pdfBuffer = await page.pdf({
       format: 'A4',
-      landscape: false, // Portrait for cover page, landscape pages handled by CSS
+      landscape: false,
       printBackground: true,
       margin: { top: '15mm', bottom: '15mm', left: '15mm', right: '15mm' },
       displayHeaderFooter: false,
-      preferCSSPageSize: true // Allow CSS to control page orientation
+      preferCSSPageSize: true,
+      timeout: 300000 // 5 minutes for PDF generation
     })
     
     await browser.close()
@@ -2077,67 +2099,105 @@ async function generateReportData(inspectionId: string) {
     const mesasResult = await pool.query(mesasQuery, [inspectionId])
     const mesas = mesasResult.rows
     
-    // Get all tipos ensayo
+    // Get all tipos ensayo (filtered by HINCAS group)
     const tiposEnsayoQuery = `
       SELECT 
         id_tipo_ensayo,
         nombre_ensayo,
         unidad_medida,
-        tipo_resultado
+        tipo_resultado,
+        grupo_ensayo
       FROM tipos_ensayo
+      WHERE grupo_ensayo = 'HINCAS'
       ORDER BY orden_prioridad ASC, nombre_ensayo
     `
     
     const tiposEnsayoResult = await pool.query(tiposEnsayoQuery)
     const tiposEnsayo = tiposEnsayoResult.rows
     
-    // For each mesa, get components and results
-    const mesasWithData = await Promise.all(
-      mesas.map(async (mesa) => {
-        // Get components
-        const componentsQuery = `
-          SELECT 
-            pc.id_componente,
-            pc.tipo_elemento,
-            pc.coord_x,
-            pc.coord_y,
-            pc.descripcion_punto_montaje
-          FROM plantilla_componentes pc
-          WHERE pc.id_plantilla = (
-            SELECT id_plantilla FROM mesas WHERE id_mesa = $1
-          )
-          ORDER BY pc.orden_prioridad ASC, pc.tipo_elemento, pc.coord_x, pc.coord_y
-        `
-        
-        const componentsResult = await pool.query(componentsQuery, [mesa.id_mesa])
-        
-        // Get results for this mesa
-        const resultsQuery = `
-          SELECT 
-            re.id_tipo_ensayo,
-            re.id_componente_plantilla_1,
-            re.resultado_numerico,
-            re.resultado_booleano,
-            re.resultado_texto,
-            re.comentario
-          FROM resultados_ensayos re
-          WHERE re.id_mesa = $1 AND re.id_inspeccion = $2
-        `
-        
-        const resultsResult = await pool.query(resultsQuery, [mesa.id_mesa, inspectionId])
-        
-        return {
-          ...mesa,
-          components: componentsResult.rows,
-          results: resultsResult.rows
-        }
-      })
-    )
+    // Get color rules
+    const colorRulesQuery = `
+      SELECT 
+        id,
+        id_tipo_ensayo,
+        tipo_condicion,
+        valor_numerico_1,
+        valor_numerico_2,
+        valor_booleano,
+        valor_texto,
+        resaltado,
+        comentario,
+        prioridad
+      FROM reglas_resultados_ensayos
+      ORDER BY prioridad ASC
+    `
+    
+    const colorRulesResult = await pool.query(colorRulesQuery)
+    const colorRules = colorRulesResult.rows
+    
+    // Optimized: Get all components and results in batch queries instead of individual queries per mesa
+    const allMesaIds = mesas.map(m => m.id_mesa)
+    
+    // Get all components for all mesas in one query
+    const allComponentsQuery = `
+      SELECT 
+        m.id_mesa,
+        pc.id_componente,
+        pc.tipo_elemento,
+        pc.coord_x,
+        pc.coord_y,
+        pc.descripcion_punto_montaje,
+        pc.orden_prioridad
+      FROM mesas m
+      JOIN plantilla_componentes pc ON m.id_plantilla = pc.id_plantilla
+      WHERE m.id_mesa = ANY($1)
+      ORDER BY m.id_mesa, pc.orden_prioridad ASC, pc.tipo_elemento, pc.coord_x, pc.coord_y
+    `
+    
+    const allComponentsResult = await pool.query(allComponentsQuery, [allMesaIds])
+    
+    // Get all results for all mesas in one query
+    const allResultsQuery = `
+      SELECT 
+        re.id_mesa,
+        re.id_tipo_ensayo,
+        re.id_componente_plantilla_1,
+        re.resultado_numerico,
+        re.resultado_booleano,
+        re.resultado_texto,
+        re.comentario
+      FROM resultados_ensayos re
+      WHERE re.id_mesa = ANY($1) AND re.id_inspeccion = $2
+    `
+    
+    const allResultsResult = await pool.query(allResultsQuery, [allMesaIds, inspectionId])
+    
+    // Group components and results by mesa_id
+    const componentsByMesa = {}
+    const resultsByMesa = {}
+    
+    allComponentsResult.rows.forEach(comp => {
+      if (!componentsByMesa[comp.id_mesa]) componentsByMesa[comp.id_mesa] = []
+      componentsByMesa[comp.id_mesa].push(comp)
+    })
+    
+    allResultsResult.rows.forEach(result => {
+      if (!resultsByMesa[result.id_mesa]) resultsByMesa[result.id_mesa] = []
+      resultsByMesa[result.id_mesa].push(result)
+    })
+    
+    // Build final mesa data structure
+    const mesasWithData = mesas.map(mesa => ({
+      ...mesa,
+      components: componentsByMesa[mesa.id_mesa] || [],
+      results: resultsByMesa[mesa.id_mesa] || []
+    }))
     
     return {
       inspection,
       mesas: mesasWithData,
       tiposEnsayo,
+      colorRules,
       generated_at: new Date().toISOString()
     }
     
@@ -2147,9 +2207,127 @@ async function generateReportData(inspectionId: string) {
   }
 }
 
+// Helper functions for result formatting
+function evaluateRule(rule: any, result: any): boolean {
+  const { tipo_condicion, valor_numerico_1, valor_numerico_2, valor_booleano, valor_texto } = rule;
+  
+  // Get result value and convert to correct type
+  let resultValue;
+  if (result.resultado_numerico !== null && result.resultado_numerico !== undefined) {
+    resultValue = parseFloat(result.resultado_numerico);
+  } else if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
+    resultValue = result.resultado_booleano;
+  } else if (result.resultado_texto !== null && result.resultado_texto !== undefined) {
+    resultValue = result.resultado_texto;
+  } else {
+    return false;
+  }
+  
+  const num1 = valor_numerico_1 !== null ? parseFloat(valor_numerico_1) : null;
+  const num2 = valor_numerico_2 !== null ? parseFloat(valor_numerico_2) : null;
+  
+  switch (tipo_condicion) {
+    case '=':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue === num1;
+      if (typeof resultValue === 'boolean') return resultValue === valor_booleano;
+      if (typeof resultValue === 'string') return resultValue === valor_texto;
+      break;
+    
+    case '<>':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue !== num1;
+      if (typeof resultValue === 'boolean') return resultValue !== valor_booleano;
+      if (typeof resultValue === 'string') return resultValue !== valor_texto;
+      break;
+    
+    case '>':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue > num1;
+      break;
+    
+    case '<':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue < num1;
+      break;
+    
+    case '>=':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue >= num1;
+      break;
+    
+    case '<=':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue <= num1;
+      break;
+    
+    case 'ENTRE':
+      if (typeof resultValue === 'number' && num1 !== null && num2 !== null) {
+        return resultValue >= num1 && resultValue <= num2;
+      }
+      break;
+    
+    case 'FUERA_DE':
+      if (typeof resultValue === 'number' && num1 !== null && num2 !== null) {
+        return resultValue < num1 || resultValue > num2;
+      }
+      break;
+  }
+  
+  return false;
+}
+
+function getCellBackgroundColor(component: any, tipoEnsayo: any, results: any[], colorRules: any[]): string | null {
+  const result = results.find(r => 
+    r.id_componente_plantilla_1 === component.id_componente && 
+    r.id_tipo_ensayo === tipoEnsayo.id_tipo_ensayo
+  );
+  
+  if (!result) {
+    return null;
+  }
+  
+  const applicableRules = colorRules.filter(rule => 
+    rule.id_tipo_ensayo === tipoEnsayo.id_tipo_ensayo
+  );
+  
+  applicableRules.sort((a, b) => a.prioridad - b.prioridad);
+  
+  for (const rule of applicableRules) {
+    const ruleMatches = evaluateRule(rule, result);
+    
+    if (ruleMatches) {
+      const colorHex = rule.resaltado.startsWith('#') ? rule.resaltado : `#${rule.resaltado}`;
+      return colorHex;
+    }
+  }
+  
+  return null;
+}
+
+function formatTestResult(component: any, tipoEnsayo: any, results: any[]): string {
+  const result = results.find(r => 
+    r.id_componente_plantilla_1 === component.id_componente && 
+    r.id_tipo_ensayo === tipoEnsayo.id_tipo_ensayo
+  );
+  
+  if (!result) {
+    return '-';
+  }
+  
+  let value = '';
+  if (result.resultado_numerico !== null && result.resultado_numerico !== undefined) {
+    value = `${result.resultado_numerico}${tipoEnsayo.unidad_medida ? ' ' + tipoEnsayo.unidad_medida : ''}`;
+  } else if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
+    value = result.resultado_booleano ? '✅' : '❌';
+  } else if (result.resultado_texto) {
+    value = result.resultado_texto;
+  }
+  
+  if (result.comentario && result.comentario.trim()) {
+    value = `* ${value}`;
+  }
+  
+  return value;
+}
+
 // Helper function to generate HTML for PDF
 function generateReportHTML(reportData: any) {
-  const { inspection, mesas, tiposEnsayo } = reportData
+  const { inspection, mesas, tiposEnsayo, colorRules } = reportData
   
   return `
     <!DOCTYPE html>
@@ -2275,26 +2453,11 @@ function generateReportHTML(reportData: any) {
                       (${Math.round(component.coord_x)}, ${Math.round(component.coord_y)})
                     </td>
                     ${tiposEnsayo.map(tipoEnsayo => {
-                      const result = mesa.results?.find(r => 
-                        r.id_componente_plantilla_1 === component.id_componente && 
-                        r.id_tipo_ensayo === tipoEnsayo.id_tipo_ensayo
-                      )
+                      const bgColor = getCellBackgroundColor(component, tipoEnsayo, mesa.results, colorRules);
+                      const resultText = formatTestResult(component, tipoEnsayo, mesa.results);
+                      const styleAttr = bgColor ? ` style="background-color: ${bgColor} !important;"` : '';
                       
-                      let resultText = '-'
-                      if (result) {
-                        if (tipoEnsayo.tipo_resultado === 'NUMERICO') {
-                          resultText = result.resultado_numerico !== null ? result.resultado_numerico.toString() : '-'
-                        } else if (tipoEnsayo.tipo_resultado === 'BOOLEANO') {
-                          resultText = result.resultado_booleano !== null ? (result.resultado_booleano ? 'Sí' : 'No') : '-'
-                        } else {
-                          resultText = result.resultado_texto || '-'
-                        }
-                        if (result.comentario?.trim()) {
-                          resultText += '*'
-                        }
-                      }
-                      
-                      return `<td class="result-cell">${resultText}</td>`
+                      return `<td class="result-cell"${styleAttr}>${resultText}</td>`
                     }).join('')}
                   </tr>
                 `).join('')}
