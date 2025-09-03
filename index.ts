@@ -2342,13 +2342,13 @@ async function generateReportData(inspectionId: string) {
     
     const resultsResult = await pool.query(resultsQuery, [allMesaIds, inspectionId])
     
-    // Group components by plantilla and results by mesa
-    const componentsByPlantilla = {}
+    // Group components by mesa and results by mesa
+    const componentsByMesa = {}
     const resultsByMesa = {}
     
     componentsResult.rows.forEach(comp => {
-      if (!componentsByPlantilla[comp.id_plantilla]) componentsByPlantilla[comp.id_plantilla] = []
-      componentsByPlantilla[comp.id_plantilla].push(comp)
+      if (!componentsByMesa[comp.id_mesa]) componentsByMesa[comp.id_mesa] = []
+      componentsByMesa[comp.id_mesa].push(comp)
     })
     
     resultsResult.rows.forEach(result => {
@@ -2356,12 +2356,12 @@ async function generateReportData(inspectionId: string) {
       resultsByMesa[result.id_mesa].push(result)
     })
     
-    console.log(`[PDF-DATA] Loaded ${componentsResult.rows.length} components from ${Object.keys(componentsByPlantilla).length} plantillas`)
+    console.log(`[PDF-DATA] Loaded ${componentsResult.rows.length} components from ${Object.keys(componentsByMesa).length} mesas`)
     console.log(`[PDF-DATA] Loaded ${resultsResult.rows.length} results from ${allMesaIds.length} mesas`)
     
     // Build final mesa data structure
     const mesasWithData = mesas.map(mesa => {
-      const components = componentsByPlantilla[mesa.id_plantilla] || []
+      const components = componentsByMesa[mesa.id_mesa] || []
       const results = resultsByMesa[mesa.id_mesa] || []
       
       console.log(`[PDF-DATA] Mesa ${mesa.id_mesa}: ${components.length} components, ${results.length} results`)
