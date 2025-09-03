@@ -2629,7 +2629,7 @@ function generateReportHTML(reportData: any) {
 
       <!-- Páginas siguientes: Una tabla por mesa -->
       ${mesas.map((mesa, index) => `
-        <div class="mesa-report-page">
+        <div class="mesa-report-page${index === mesas.length - 1 ? ' last-mesa' : ''}">
           <div class="mesa-page-header">
             <div>
               <h2>Mesa: ${mesa.nombre_mesa} (ID: ${mesa.id_mesa})</h2>
@@ -2732,21 +2732,15 @@ function getPDFStyles() {
     
     .mesa-report-page {
       width: 100%;
-      min-height: calc(100vh - 30mm);
       page-break-after: always;
-      page-break-inside: avoid;
       padding: 10mm;
       margin: 0;
       box-sizing: border-box;
       page: landscape;
     }
     
-    .mesa-report-page:last-child {
-      page-break-after: avoid;
-    }
-    
-    .mesa-report-page:last-child {
-      page-break-after: auto;
+    .mesa-report-page.last-mesa {
+      page-break-after: avoid !important;
     }
     
     .report-header-logo {
@@ -2928,7 +2922,11 @@ function getPDFStyles() {
     }
     
     .mesa-results-table tbody tr {
-      page-break-inside: avoid;
+      page-break-inside: auto;
+    }
+    
+    .mesa-results-table {
+      page-break-after: avoid;
     }
   `
 }
