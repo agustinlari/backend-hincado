@@ -5,6 +5,7 @@ import { Pool } from 'pg'
 import { serve } from '@hono/node-server'
 import { jwt, sign, verify } from 'hono/jwt'
 import * as jose from 'jose'
+import puppeteer from 'puppeteer'
 
 const app = new Hono()
 
@@ -412,6 +413,57 @@ app.get('/api/export/inspecciones-data', exportAuthMiddleware, async (c) => {
   }
 })
 
+// Generate PDF report for inspection
+app.post('/api/reports/pdf/:inspectionId', authMiddleware, async (c) => {
+  const inspectionId = c.req.param('inspectionId')
+  
+  try {
+    console.log(`🔍 Generating PDF for inspection ${inspectionId}`)
+    
+    // Get report data
+    const reportData = await generateReportData(inspectionId)
+    if (!reportData) {
+      return c.json({ error: 'Inspection not found or no data available' }, 404)
+    }
+    
+    // Generate HTML
+    const htmlContent = generateReportHTML(reportData)
+    
+    // Generate PDF with Puppeteer
+    const browser = await puppeteer.launch({ 
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'] // For server environments
+    })
+    
+    const page = await browser.newPage()
+    await page.setContent(htmlContent, { waitUntil: 'networkidle0' })
+    
+    const pdfBuffer = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' },
+      displayHeaderFooter: false
+    })
+    
+    await browser.close()
+    
+    console.log(`✅ PDF generated successfully for inspection ${inspectionId}`)
+    
+    // Return PDF
+    c.header('Content-Type', 'application/pdf')
+    c.header('Content-Disposition', `attachment; filename="informe-inspeccion-${inspectionId}.pdf"`)
+    
+    return c.body(pdfBuffer)
+    
+  } catch (error) {
+    console.error('Error generating PDF:', error)
+    return c.json({ 
+      error: 'Failed to generate PDF report',
+      details: error.message 
+    }, 500)
+  }
+})
+
 // Get all mesas with their CT and plantilla info
 app.get('/api/mesas', authMiddleware, async (c) => {
   try {
@@ -496,6 +548,100 @@ app.get('/api/mesas/:id/components', authMiddleware, async (c) => {
   } catch (error) {
     console.error('Error fetching mesa components:', error)
     return c.json({ error: 'Failed to fetch mesa components' }, 500)
+  }
+})
+
+// Get full mesa data for printing reports
+app.get('/api/mesas/:id/full-report-data/:inspectionId', authMiddleware, async (c) => {
+  const mesaId = c.req.param('id')
+  const inspectionId = c.req.param('inspectionId')
+  
+  try {
+    // Get mesa basic info
+    const mesaQuery = `
+      SELECT 
+        m.id_mesa,
+        m.nombre_mesa,
+        m.coord_x,
+        m.coord_y,
+        c.nombre_ct,
+        mp.nombre_plantilla,
+        mp.dimension_x,
+        mp.dimension_y,
+        mp.id_plantilla
+      FROM mesas m
+      JOIN cts c ON m.id_ct = c.id_ct
+      JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
+      WHERE m.id_mesa = $1
+    `
+    
+    const mesaResult = await pool.query(mesaQuery, [mesaId])
+    if (mesaResult.rows.length === 0) {
+      return c.json({ error: 'Mesa not found' }, 404)
+    }
+    
+    const mesa = mesaResult.rows[0]
+    
+    // Get plantilla components
+    const componentsQuery = `
+      SELECT 
+        id_componente,
+        tipo_elemento,
+        coord_x,
+        coord_y,
+        descripcion_punto_montaje,
+        orden_prioridad
+      FROM plantilla_componentes 
+      WHERE id_plantilla = $1
+      ORDER BY orden_prioridad ASC, tipo_elemento, coord_x, coord_y
+    `
+    
+    const componentsResult = await pool.query(componentsQuery, [mesa.id_plantilla])
+    
+    // Get all tipos ensayo
+    const tiposEnsayoQuery = `
+      SELECT 
+        id_tipo_ensayo,
+        nombre_ensayo,
+        descripcion,
+        unidad_medida,
+        grupo_ensayo,
+        tipo_resultado,
+        minimo_admisible,
+        maximo_admisible,
+        orden_prioridad
+      FROM tipos_ensayo
+      ORDER BY grupo_ensayo, orden_prioridad ASC, nombre_ensayo
+    `
+    
+    const tiposEnsayoResult = await pool.query(tiposEnsayoQuery)
+    
+    // Get test results for this mesa and inspection
+    const resultsQuery = `
+      SELECT 
+        re.id_tipo_ensayo,
+        re.id_componente_plantilla_1,
+        re.resultado_numerico,
+        re.resultado_booleano,
+        re.resultado_texto,
+        re.comentario,
+        re.fecha_medicion
+      FROM resultados_ensayos re
+      WHERE re.id_mesa = $1 AND re.id_inspeccion = $2
+    `
+    
+    const resultsResult = await pool.query(resultsQuery, [mesaId, inspectionId])
+    
+    return c.json({
+      ...mesa,
+      components: componentsResult.rows,
+      tiposEnsayo: tiposEnsayoResult.rows,
+      results: resultsResult.rows
+    })
+    
+  } catch (error) {
+    console.error('Error fetching mesa full report data:', error)
+    return c.json({ error: 'Failed to fetch mesa report data' }, 500)
   }
 })
 
@@ -1892,6 +2038,475 @@ app.get('/api/export/inspecciones/:id/resultados', exportAuthMiddleware, async (
     return c.json({ error: 'Failed to export inspection results' }, 500)
   }
 })
+
+// Helper function to get all report data
+async function generateReportData(inspectionId: string) {
+  try {
+    // Get inspection info
+    const inspectionQuery = `
+      SELECT * FROM inspecciones 
+      WHERE id_inspeccion = $1
+    `
+    const inspectionResult = await pool.query(inspectionQuery, [inspectionId])
+    
+    if (inspectionResult.rows.length === 0) {
+      return null
+    }
+    
+    const inspection = inspectionResult.rows[0]
+    
+    // Get mesas with results for this inspection
+    const mesasQuery = `
+      SELECT DISTINCT 
+        m.id_mesa,
+        m.nombre_mesa,
+        m.coord_x,
+        m.coord_y,
+        c.nombre_ct,
+        mp.nombre_plantilla
+      FROM mesas m
+      JOIN cts c ON m.id_ct = c.id_ct
+      JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
+      JOIN resultados_ensayos re ON m.id_mesa = re.id_mesa
+      WHERE re.id_inspeccion = $1
+      ORDER BY m.id_mesa
+    `
+    
+    const mesasResult = await pool.query(mesasQuery, [inspectionId])
+    const mesas = mesasResult.rows
+    
+    // Get all tipos ensayo
+    const tiposEnsayoQuery = `
+      SELECT 
+        id_tipo_ensayo,
+        nombre_ensayo,
+        unidad_medida,
+        tipo_resultado
+      FROM tipos_ensayo
+      ORDER BY orden_prioridad ASC, nombre_ensayo
+    `
+    
+    const tiposEnsayoResult = await pool.query(tiposEnsayoQuery)
+    const tiposEnsayo = tiposEnsayoResult.rows
+    
+    // For each mesa, get components and results
+    const mesasWithData = await Promise.all(
+      mesas.map(async (mesa) => {
+        // Get components
+        const componentsQuery = `
+          SELECT 
+            pc.id_componente,
+            pc.tipo_elemento,
+            pc.coord_x,
+            pc.coord_y,
+            pc.descripcion_punto_montaje
+          FROM plantilla_componentes pc
+          WHERE pc.id_plantilla = (
+            SELECT id_plantilla FROM mesas WHERE id_mesa = $1
+          )
+          ORDER BY pc.orden_prioridad ASC, pc.tipo_elemento, pc.coord_x, pc.coord_y
+        `
+        
+        const componentsResult = await pool.query(componentsQuery, [mesa.id_mesa])
+        
+        // Get results for this mesa
+        const resultsQuery = `
+          SELECT 
+            re.id_tipo_ensayo,
+            re.id_componente_plantilla_1,
+            re.resultado_numerico,
+            re.resultado_booleano,
+            re.resultado_texto,
+            re.comentario
+          FROM resultados_ensayos re
+          WHERE re.id_mesa = $1 AND re.id_inspeccion = $2
+        `
+        
+        const resultsResult = await pool.query(resultsQuery, [mesa.id_mesa, inspectionId])
+        
+        return {
+          ...mesa,
+          components: componentsResult.rows,
+          results: resultsResult.rows
+        }
+      })
+    )
+    
+    return {
+      inspection,
+      mesas: mesasWithData,
+      tiposEnsayo,
+      generated_at: new Date().toISOString()
+    }
+    
+  } catch (error) {
+    console.error('Error generating report data:', error)
+    return null
+  }
+}
+
+// Helper function to generate HTML for PDF
+function generateReportHTML(reportData: any) {
+  const { inspection, mesas, tiposEnsayo } = reportData
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>Informe Inspección #${inspection.id_inspeccion}</title>
+      <style>
+        ${getPDFStyles()}
+      </style>
+    </head>
+    <body>
+      <!-- Página 1: Información de la inspección -->
+      <div class="report-cover-page">
+        <div class="report-header-logo">
+          <h1>📋 INFORME DE INSPECCIÓN</h1>
+          <div class="report-subtitle">Sistema de Inspecciones de Hincado</div>
+        </div>
+        
+        <div class="inspection-summary">
+          <h2>Datos de la Inspección</h2>
+          <div class="summary-grid">
+            <div class="summary-item">
+              <span class="summary-label">ID Inspección:</span>
+              <span class="summary-value">#${inspection.id_inspeccion}</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">Fecha de Inicio:</span>
+              <span class="summary-value">${new Date(inspection.fecha_inicio).toLocaleString('es-ES')}</span>
+            </div>
+            ${inspection.fecha_fin ? `
+            <div class="summary-item">
+              <span class="summary-label">Fecha de Fin:</span>
+              <span class="summary-value">${new Date(inspection.fecha_fin).toLocaleString('es-ES')}</span>
+            </div>
+            ` : ''}
+            <div class="summary-item">
+              <span class="summary-label">Estado:</span>
+              <span class="summary-value">${inspection.estado}</span>
+            </div>
+            ${inspection.descripcion ? `
+            <div class="summary-item full-width">
+              <span class="summary-label">Descripción:</span>
+              <span class="summary-value">${inspection.descripcion}</span>
+            </div>
+            ` : ''}
+          </div>
+        </div>
+
+        <div class="mesas-summary">
+          <h2>Resumen de Mesas Inspeccionadas</h2>
+          <p><strong>Total de mesas:</strong> ${mesas.length}</p>
+          
+          <table class="summary-table">
+            <thead>
+              <tr>
+                <th>ID Mesa</th>
+                <th>Nombre</th>
+                <th>CT</th>
+                <th>Total Ensayos</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${mesas.map(mesa => `
+                <tr>
+                  <td>${mesa.id_mesa}</td>
+                  <td>${mesa.nombre_mesa}</td>
+                  <td>${mesa.nombre_ct || 'N/A'}</td>
+                  <td>${mesa.results?.length || 0}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="report-footer">
+          <p><strong>Informe generado:</strong> ${new Date(reportData.generated_at).toLocaleString('es-ES')}</p>
+          <p><strong>Sistema:</strong> Inspecciones Hincado v1.0</p>
+        </div>
+      </div>
+
+      <!-- Páginas siguientes: Una tabla por mesa -->
+      ${mesas.map((mesa, index) => `
+        <div class="mesa-report-page">
+          <div class="mesa-page-header">
+            <h2>Mesa: ${mesa.nombre_mesa} (ID: ${mesa.id_mesa})</h2>
+            <div class="mesa-details">
+              <span><strong>CT:</strong> ${mesa.nombre_ct || 'N/A'}</span>
+              <span><strong>Coordenadas:</strong> 
+                (${typeof mesa.coord_x === 'number' ? mesa.coord_x.toFixed(6) : mesa.coord_x || 'N/A'}, 
+                 ${typeof mesa.coord_y === 'number' ? mesa.coord_y.toFixed(6) : mesa.coord_y || 'N/A'})
+              </span>
+            </div>
+          </div>
+
+          ${mesa.components && mesa.components.length > 0 && tiposEnsayo && tiposEnsayo.length > 0 ? `
+            <table class="mesa-results-table">
+              <thead>
+                <tr>
+                  <th class="component-header">Componente</th>
+                  <th class="coordinates-header">Coordenadas</th>
+                  ${tiposEnsayo.map(tipoEnsayo => `
+                    <th class="test-header">
+                      ${tipoEnsayo.nombre_ensayo}
+                      ${tipoEnsayo.unidad_medida ? `<br><small>(${tipoEnsayo.unidad_medida})</small>` : ''}
+                    </th>
+                  `).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${mesa.components.map(component => `
+                  <tr>
+                    <td class="component-cell">
+                      <span class="component-icon">
+                        ${component.tipo_elemento === 'PANEL' ? '🔆' : '🔧'}
+                      </span>
+                      ${component.descripcion_punto_montaje || `${component.tipo_elemento} ${component.id_componente}`}
+                    </td>
+                    <td class="coordinates-cell">
+                      (${Math.round(component.coord_x)}, ${Math.round(component.coord_y)})
+                    </td>
+                    ${tiposEnsayo.map(tipoEnsayo => {
+                      const result = mesa.results?.find(r => 
+                        r.id_componente_plantilla_1 === component.id_componente && 
+                        r.id_tipo_ensayo === tipoEnsayo.id_tipo_ensayo
+                      )
+                      
+                      let resultText = '-'
+                      if (result) {
+                        if (tipoEnsayo.tipo_resultado === 'NUMERICO') {
+                          resultText = result.resultado_numerico !== null ? result.resultado_numerico.toString() : '-'
+                        } else if (tipoEnsayo.tipo_resultado === 'BOOLEANO') {
+                          resultText = result.resultado_booleano !== null ? (result.resultado_booleano ? 'Sí' : 'No') : '-'
+                        } else {
+                          resultText = result.resultado_texto || '-'
+                        }
+                        if (result.comentario?.trim()) {
+                          resultText += '*'
+                        }
+                      }
+                      
+                      return `<td class="result-cell">${resultText}</td>`
+                    }).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          ` : `
+            <p class="no-results">No se encontraron datos para esta mesa.</p>
+          `}
+
+          <div class="page-footer">
+            <span>Página ${index + 2} de ${mesas.length + 1}</span>
+            <span>Mesa ${mesa.id_mesa} - ${mesa.nombre_mesa}</span>
+          </div>
+        </div>
+      `).join('')}
+    </body>
+    </html>
+  `
+}
+
+// CSS styles for PDF
+function getPDFStyles() {
+  return `
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+      line-height: 1.4;
+      color: #333;
+    }
+    
+    .report-cover-page,
+    .mesa-report-page {
+      width: 100%;
+      min-height: 100vh;
+      page-break-after: always;
+      page-break-inside: avoid;
+      padding: 20mm;
+      margin: 0;
+      box-sizing: border-box;
+    }
+    
+    .mesa-report-page:last-child {
+      page-break-after: auto;
+    }
+    
+    .report-header-logo {
+      text-align: center;
+      margin-bottom: 30px;
+      border-bottom: 2px solid #333;
+      padding-bottom: 20px;
+    }
+    
+    .report-header-logo h1 {
+      font-size: 28px;
+      font-weight: bold;
+      margin: 0;
+      color: #333;
+    }
+    
+    .report-subtitle {
+      font-size: 16px;
+      color: #666;
+      margin-top: 10px;
+    }
+    
+    .inspection-summary h2,
+    .mesas-summary h2 {
+      font-size: 20px;
+      margin-bottom: 15px;
+      color: #333;
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 5px;
+    }
+    
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 15px;
+      margin-bottom: 30px;
+    }
+    
+    .summary-item {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    
+    .summary-item.full-width {
+      grid-column: 1 / -1;
+    }
+    
+    .summary-label {
+      font-weight: bold;
+      color: #555;
+    }
+    
+    .summary-value {
+      color: #333;
+    }
+    
+    .summary-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 30px;
+    }
+    
+    .summary-table th,
+    .summary-table td {
+      border: 1px solid #ddd;
+      padding: 8px;
+      text-align: left;
+    }
+    
+    .summary-table th {
+      background-color: #f8f9fa;
+      font-weight: bold;
+    }
+    
+    .mesa-page-header {
+      margin-bottom: 20px;
+      border-bottom: 1px solid #ccc;
+      padding-bottom: 15px;
+    }
+    
+    .mesa-page-header h2 {
+      font-size: 18px;
+      margin: 0 0 8px 0;
+      color: #333;
+    }
+    
+    .mesa-details {
+      font-size: 12px;
+      color: #666;
+    }
+    
+    .mesa-results-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 10px;
+      margin-top: 10px;
+      table-layout: fixed;
+    }
+    
+    .mesa-results-table th,
+    .mesa-results-table td {
+      border: 1px solid #333;
+      padding: 4px 6px;
+      text-align: center;
+      word-wrap: break-word;
+      overflow: hidden;
+    }
+    
+    .mesa-results-table th {
+      background-color: #f0f0f0;
+      font-weight: bold;
+      font-size: 9px;
+    }
+    
+    .mesa-results-table .component-header {
+      text-align: left !important;
+      width: 100px;
+    }
+    
+    .mesa-results-table .component-cell {
+      text-align: left !important;
+      font-size: 9px;
+    }
+    
+    .mesa-results-table .coordinates-cell {
+      font-size: 8px;
+      color: #666;
+      width: 60px;
+    }
+    
+    .mesa-results-table .result-cell {
+      font-size: 9px;
+      font-weight: normal;
+    }
+    
+    .component-icon {
+      margin-right: 4px;
+    }
+    
+    .page-footer {
+      position: fixed;
+      bottom: 10mm;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-size: 10px;
+      color: #666;
+    }
+    
+    .report-footer {
+      margin-top: 30px;
+      text-align: center;
+      font-size: 12px;
+      color: #666;
+    }
+    
+    .no-results {
+      text-align: center;
+      color: #666;
+      font-style: italic;
+      padding: 20px;
+    }
+    
+    .mesa-results-table tbody tr {
+      page-break-inside: avoid;
+    }
+  `
+}
 
 // Start the server
 const port = process.env.PORT ? parseInt(process.env.PORT) : 8787
