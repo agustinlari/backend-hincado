@@ -440,9 +440,11 @@ app.post('/api/reports/pdf/:inspectionId', authMiddleware, async (c) => {
     
     const pdfBuffer = await page.pdf({
       format: 'A4',
+      landscape: false, // Portrait for cover page, landscape pages handled by CSS
       printBackground: true,
-      margin: { top: '20mm', bottom: '20mm', left: '15mm', right: '15mm' },
-      displayHeaderFooter: false
+      margin: { top: '15mm', bottom: '15mm', left: '15mm', right: '15mm' },
+      displayHeaderFooter: false,
+      preferCSSPageSize: true // Allow CSS to control page orientation
     })
     
     await browser.close()
@@ -2233,13 +2235,16 @@ function generateReportHTML(reportData: any) {
       ${mesas.map((mesa, index) => `
         <div class="mesa-report-page">
           <div class="mesa-page-header">
-            <h2>Mesa: ${mesa.nombre_mesa} (ID: ${mesa.id_mesa})</h2>
+            <div>
+              <h2>Mesa: ${mesa.nombre_mesa} (ID: ${mesa.id_mesa})</h2>
+            </div>
             <div class="mesa-details">
               <span><strong>CT:</strong> ${mesa.nombre_ct || 'N/A'}</span>
               <span><strong>Coordenadas:</strong> 
                 (${typeof mesa.coord_x === 'number' ? mesa.coord_x.toFixed(6) : mesa.coord_x || 'N/A'}, 
                  ${typeof mesa.coord_y === 'number' ? mesa.coord_y.toFixed(6) : mesa.coord_y || 'N/A'})
               </span>
+              <span><strong>Página:</strong> ${index + 2}/${mesas.length + 1}</span>
             </div>
           </div>
 
@@ -2299,10 +2304,6 @@ function generateReportHTML(reportData: any) {
             <p class="no-results">No se encontraron datos para esta mesa.</p>
           `}
 
-          <div class="page-footer">
-            <span>Página ${index + 2} de ${mesas.length + 1}</span>
-            <span>Mesa ${mesa.id_mesa} - ${mesa.nombre_mesa}</span>
-          </div>
         </div>
       `).join('')}
     </body>
@@ -2325,8 +2326,7 @@ function getPDFStyles() {
       color: #333;
     }
     
-    .report-cover-page,
-    .mesa-report-page {
+    .report-cover-page {
       width: 100%;
       min-height: 100vh;
       page-break-after: always;
@@ -2334,6 +2334,22 @@ function getPDFStyles() {
       padding: 20mm;
       margin: 0;
       box-sizing: border-box;
+    }
+    
+    @page mesa {
+      size: A4 landscape;
+      margin: 15mm;
+    }
+    
+    .mesa-report-page {
+      width: 100%;
+      height: 100vh;
+      page-break-after: always;
+      page-break-inside: avoid;
+      padding: 0;
+      margin: 0;
+      box-sizing: border-box;
+      page: mesa;
     }
     
     .mesa-report-page:last-child {
@@ -2414,79 +2430,97 @@ function getPDFStyles() {
     }
     
     .mesa-page-header {
-      margin-bottom: 20px;
+      margin-bottom: 15px;
       border-bottom: 1px solid #ccc;
-      padding-bottom: 15px;
+      padding-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
     
     .mesa-page-header h2 {
-      font-size: 18px;
-      margin: 0 0 8px 0;
+      font-size: 16px;
+      margin: 0;
       color: #333;
     }
     
     .mesa-details {
-      font-size: 12px;
+      font-size: 11px;
       color: #666;
+      display: flex;
+      gap: 15px;
     }
     
     .mesa-results-table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 10px;
-      margin-top: 10px;
-      table-layout: fixed;
+      font-size: 8px;
+      margin-top: 5px;
+      table-layout: auto;
+      max-height: calc(100vh - 120mm);
+      overflow: visible;
     }
     
     .mesa-results-table th,
     .mesa-results-table td {
       border: 1px solid #333;
-      padding: 4px 6px;
+      padding: 2px 4px;
       text-align: center;
       word-wrap: break-word;
       overflow: hidden;
+      max-width: 80px;
     }
     
     .mesa-results-table th {
       background-color: #f0f0f0;
       font-weight: bold;
-      font-size: 9px;
+      font-size: 7px;
+      line-height: 1.2;
     }
     
     .mesa-results-table .component-header {
       text-align: left !important;
-      width: 100px;
+      width: 80px;
+      min-width: 80px;
     }
     
     .mesa-results-table .component-cell {
       text-align: left !important;
-      font-size: 9px;
+      font-size: 7px;
+      width: 80px;
+      min-width: 80px;
+    }
+    
+    .mesa-results-table .coordinates-header {
+      width: 50px;
+      min-width: 50px;
     }
     
     .mesa-results-table .coordinates-cell {
-      font-size: 8px;
+      font-size: 6px;
       color: #666;
-      width: 60px;
+      width: 50px;
+      min-width: 50px;
+    }
+    
+    .mesa-results-table .test-header {
+      width: 40px;
+      min-width: 40px;
+      font-size: 6px;
+      line-height: 1.1;
     }
     
     .mesa-results-table .result-cell {
-      font-size: 9px;
+      font-size: 7px;
       font-weight: normal;
+      width: 40px;
+      min-width: 40px;
     }
     
     .component-icon {
       margin-right: 4px;
     }
     
-    .page-footer {
-      position: fixed;
-      bottom: 10mm;
-      left: 0;
-      right: 0;
-      text-align: center;
-      font-size: 10px;
-      color: #666;
-    }
     
     .report-footer {
       margin-top: 30px;
