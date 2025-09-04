@@ -1809,20 +1809,50 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
     const ensayosPorTipoResultadoResult = await pool.query(ensayosPorTipoResultadoQuery)
     const ensayosPorTipoResultado = ensayosPorTipoResultadoResult.rows
     
-    // Get temporal evolution (last 12 months) using NOK comentario
+    // Get temporal evolution (last 7 days with cumulative totals)
     const evolucionTemporalQuery = `
+      WITH date_series AS (
+        SELECT generate_series(
+          CURRENT_DATE - INTERVAL '6 days',
+          CURRENT_DATE,
+          INTERVAL '1 day'
+        )::date as fecha
+      ),
+      daily_counts AS (
+        SELECT 
+          DATE(re.fecha_medicion) as fecha,
+          COUNT(re.id_resultado) as cantidad_dia
+        FROM resultados_ensayos re
+        WHERE DATE(re.fecha_medicion) >= CURRENT_DATE - INTERVAL '6 days'
+        GROUP BY DATE(re.fecha_medicion)
+      ),
+      cumulative_before_period AS (
+        SELECT COUNT(*) as total_anterior
+        FROM resultados_ensayos
+        WHERE DATE(fecha_medicion) < CURRENT_DATE - INTERVAL '6 days'
+      )
       SELECT 
-        TO_CHAR(re.fecha_medicion, 'YYYY-MM') as fecha,
-        COUNT(re.id_resultado) as cantidad,
-        COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END) as fallidos
-      FROM resultados_ensayos re
-      LEFT JOIN reglas_resultados_ensayos r ON re.id_tipo_ensayo = r.id_tipo_ensayo
-      WHERE re.fecha_medicion >= CURRENT_DATE - INTERVAL '12 months'
-      GROUP BY TO_CHAR(re.fecha_medicion, 'YYYY-MM')
-      ORDER BY fecha
+        ds.fecha,
+        COALESCE(
+          (SELECT total_anterior FROM cumulative_before_period) +
+          (SELECT COALESCE(SUM(dc2.cantidad_dia), 0) 
+           FROM daily_counts dc2 
+           WHERE dc2.fecha <= ds.fecha),
+          (SELECT total_anterior FROM cumulative_before_period)
+        ) as cantidad_acumulada
+      FROM date_series ds
+      ORDER BY ds.fecha
     `
     const evolucionTemporalResult = await pool.query(evolucionTemporalQuery)
-    const evolucionTemporal = evolucionTemporalResult.rows
+    const evolucionTemporal = evolucionTemporalResult.rows.map((row: any) => {
+      const fecha = new Date(row.fecha);
+      const dia = fecha.getDate().toString().padStart(2, '0');
+      const mes = (fecha.getMonth() + 1).toString().padStart(2, '0');
+      return {
+        fecha: `${dia}/${mes}`, // Format as DD/MM
+        cantidad: parseInt(row.cantidad_acumulada)
+      };
+    })
     
     // Get total components for "Sin medición" calculation
     const totalComponentesQuery = `
@@ -1925,8 +1955,6 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
       totalEnsayosBooleanos,
       tasaExito,
       mesasInspeccionadas,
-      ensayosPorTipo,
-      ensayosPorTipoResultado,
       evolucionTemporal,
       pieChartsData,
       totalComponentes
