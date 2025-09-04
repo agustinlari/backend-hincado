@@ -1824,60 +1824,97 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
     const evolucionTemporalResult = await pool.query(evolucionTemporalQuery)
     const evolucionTemporal = evolucionTemporalResult.rows
     
-    // Get categories showing OK vs NOK results
-    const resultadosPorCategoriaQuery = `
-      SELECT 
-        CASE 
-          WHEN r.comentario = 'OK' THEN 'Resultados Correctos'
-          WHEN r.comentario = 'NOK' THEN 'Resultados Fallidos'
-          ELSE COALESCE(r.comentario, 'Sin categoría')
-        END as categoria,
-        te.tipo_resultado,
-        COUNT(re.id_resultado) as total_ensayos,
-        COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END) as fallidos,
-        CASE WHEN r.comentario = 'NOK' THEN '#F54927' ELSE '#10b981' END as resaltado
-      FROM reglas_resultados_ensayos r
-      LEFT JOIN resultados_ensayos re ON r.id_tipo_ensayo = re.id_tipo_ensayo
-      LEFT JOIN tipos_ensayo te ON r.id_tipo_ensayo = te.id_tipo_ensayo
-      WHERE r.comentario IN ('OK', 'NOK')
-      GROUP BY r.comentario, te.tipo_resultado
-      HAVING COUNT(re.id_resultado) > 0
-      ORDER BY 
-        CASE WHEN r.comentario = 'NOK' THEN 0 ELSE 1 END,
-        fallidos DESC
-      LIMIT 8
+    // Get total components for "Sin medición" calculation
+    const totalComponentesQuery = `
+      SELECT COUNT(*) as total
+      FROM mesas m
+      JOIN plantilla_componentes pc ON m.id_plantilla = pc.id_plantilla
     `
-    const resultadosPorCategoriaResult = await pool.query(resultadosPorCategoriaQuery)
-    const resultadosPorCategoria = resultadosPorCategoriaResult.rows
+    const totalComponentesResult = await pool.query(totalComponentesQuery)
+    const totalComponentes = parseInt(totalComponentesResult.rows[0].total)
 
-    // Get most failed test types using NOK comentario
-    const tiposEnsayoMasFallidosQuery = `
+    // Get pie chart data for each HINCAS test type
+    const pieChartsDataQuery = `
       SELECT 
+        te.id_tipo_ensayo,
         te.nombre_ensayo,
         te.tipo_resultado,
+        r.comentario as categoria,
+        COUNT(re.id_resultado) as cantidad,
         CASE 
-          WHEN r.comentario = 'NOK' THEN 'Fallidos'
-          WHEN r.comentario = 'OK' THEN 'Correctos'
-          ELSE 'General'
-        END as categoria,
-        COUNT(re.id_resultado) as total_ensayos,
-        COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END) as fallidos,
-        CASE 
-          WHEN COUNT(re.id_resultado) > 0 THEN 
-            ROUND((COUNT(CASE WHEN r.comentario = 'NOK' THEN 1 END)::numeric / COUNT(re.id_resultado)) * 100, 1)
-          ELSE 0
-        END as porcentaje_fallos
+          WHEN r.comentario = 'OK' THEN '#10b981'
+          WHEN r.comentario = 'NOK' THEN '#F54927'
+          ELSE '#6366f1'
+        END as color
       FROM tipos_ensayo te
-      LEFT JOIN resultados_ensayos re ON te.id_tipo_ensayo = re.id_tipo_ensayo
       LEFT JOIN reglas_resultados_ensayos r ON te.id_tipo_ensayo = r.id_tipo_ensayo
-      WHERE r.comentario = 'NOK'
+      LEFT JOIN resultados_ensayos re ON (
+        te.id_tipo_ensayo = re.id_tipo_ensayo AND
+        (
+          (r.valor_booleano IS NOT NULL AND re.resultado_booleano = r.valor_booleano) OR
+          (r.valor_numerico_1 IS NOT NULL AND (
+            (r.tipo_condicion = '=' AND re.resultado_numerico = r.valor_numerico_1) OR
+            (r.tipo_condicion = '<>' AND re.resultado_numerico != r.valor_numerico_1) OR
+            (r.tipo_condicion = '>' AND re.resultado_numerico > r.valor_numerico_1) OR
+            (r.tipo_condicion = '<' AND re.resultado_numerico < r.valor_numerico_1) OR
+            (r.tipo_condicion = '>=' AND re.resultado_numerico >= r.valor_numerico_1) OR
+            (r.tipo_condicion = '<=' AND re.resultado_numerico <= r.valor_numerico_1) OR
+            (r.tipo_condicion = 'ENTRE' AND re.resultado_numerico >= r.valor_numerico_1 AND re.resultado_numerico <= r.valor_numerico_2) OR
+            (r.tipo_condicion = 'FUERA_DE' AND (re.resultado_numerico < r.valor_numerico_1 OR re.resultado_numerico > r.valor_numerico_2))
+          )) OR
+          (r.valor_texto IS NOT NULL AND (
+            (r.tipo_condicion = '=' AND re.resultado_texto = r.valor_texto) OR
+            (r.tipo_condicion = '<>' AND re.resultado_texto != r.valor_texto)
+          ))
+        )
+      )
+      WHERE te.grupo_ensayo = 'HINCAS' AND r.comentario IN ('OK', 'NOK')
       GROUP BY te.id_tipo_ensayo, te.nombre_ensayo, te.tipo_resultado, r.comentario
-      HAVING COUNT(re.id_resultado) > 0
-      ORDER BY fallidos DESC, porcentaje_fallos DESC
-      LIMIT 8
+      ORDER BY te.nombre_ensayo, r.comentario
     `
-    const tiposEnsayoMasFallidosResult = await pool.query(tiposEnsayoMasFallidosQuery)
-    const tiposEnsayoMasFallidos = tiposEnsayoMasFallidosResult.rows
+    const pieChartsResult = await pool.query(pieChartsDataQuery)
+    
+    // Group pie chart data by test type
+    const pieChartsData: any = {};
+    pieChartsResult.rows.forEach((row: any) => {
+      if (!pieChartsData[row.id_tipo_ensayo]) {
+        pieChartsData[row.id_tipo_ensayo] = {
+          nombre_ensayo: row.nombre_ensayo,
+          tipo_resultado: row.tipo_resultado,
+          data: []
+        };
+      }
+      pieChartsData[row.id_tipo_ensayo].data.push({
+        categoria: row.categoria,
+        cantidad: parseInt(row.cantidad),
+        color: row.color
+      });
+    });
+
+    // Add "Sin medición" category for each test type
+    for (const tipoEnsayoId in pieChartsData) {
+      const chartData = pieChartsData[tipoEnsayoId];
+      
+      // Count total measured for this specific test type
+      const totalMedidosQuery = `
+        SELECT COUNT(*) as total
+        FROM resultados_ensayos
+        WHERE id_tipo_ensayo = $1
+      `
+      const totalMedidosResult = await pool.query(totalMedidosQuery, [tipoEnsayoId])
+      const totalMedidos = parseInt(totalMedidosResult.rows[0].total)
+      
+      // Calculate "Sin medición" for this test type
+      const sinMedicion = totalComponentes - totalMedidos
+      
+      if (sinMedicion > 0) {
+        chartData.data.push({
+          categoria: 'Sin medición',
+          cantidad: sinMedicion,
+          color: '#94a3b8'
+        });
+      }
+    }
     
     const estadisticas = {
       totalEnsayos,
@@ -1888,17 +1925,16 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
       totalEnsayosBooleanos,
       tasaExito,
       mesasInspeccionadas,
-      inspeccionesActivas,
       ensayosPorTipo,
       ensayosPorTipoResultado,
       evolucionTemporal,
-      tiposEnsayoMasFallidos,
-      resultadosPorCategoria
+      pieChartsData,
+      totalComponentes
     }
     
     console.log('📈 Real dashboard statistics generated:', {
       ...estadisticas,
-      tiposEnsayoMasFallidos: estadisticas.tiposEnsayoMasFallidos.length
+      pieChartsData: Object.keys(estadisticas.pieChartsData).length
     })
     return c.json(estadisticas)
     
