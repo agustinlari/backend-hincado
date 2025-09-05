@@ -1863,14 +1863,28 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
     const totalComponentesResult = await pool.query(totalComponentesQuery)
     const totalComponentes = parseInt(totalComponentesResult.rows[0].total)
 
-    // Get pie chart data for each HINCAS test type
+    // Get pie chart data for each HINCAS test type (only latest result per component)
     const pieChartsDataQuery = `
+      WITH latest_results AS (
+        SELECT 
+          re.id_tipo_ensayo,
+          re.id_mesa,
+          re.id_componente_plantilla_1,
+          re.resultado_numerico,
+          re.resultado_booleano,
+          re.resultado_texto,
+          ROW_NUMBER() OVER (
+            PARTITION BY re.id_tipo_ensayo, re.id_mesa, re.id_componente_plantilla_1 
+            ORDER BY re.fecha_medicion DESC
+          ) as rn
+        FROM resultados_ensayos re
+      )
       SELECT 
         te.id_tipo_ensayo,
         te.nombre_ensayo,
         te.tipo_resultado,
         r.comentario as categoria,
-        COUNT(re.id_resultado) as cantidad,
+        COUNT(lr.id_tipo_ensayo) as cantidad,
         CASE 
           WHEN r.comentario = 'OK' THEN '#10b981'
           WHEN r.comentario = 'NOK' THEN '#F54927'
@@ -1878,23 +1892,24 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
         END as color
       FROM tipos_ensayo te
       LEFT JOIN reglas_resultados_ensayos r ON te.id_tipo_ensayo = r.id_tipo_ensayo
-      LEFT JOIN resultados_ensayos re ON (
-        te.id_tipo_ensayo = re.id_tipo_ensayo AND
+      LEFT JOIN latest_results lr ON (
+        te.id_tipo_ensayo = lr.id_tipo_ensayo AND 
+        lr.rn = 1 AND
         (
-          (r.valor_booleano IS NOT NULL AND re.resultado_booleano = r.valor_booleano) OR
+          (r.valor_booleano IS NOT NULL AND lr.resultado_booleano = r.valor_booleano) OR
           (r.valor_numerico_1 IS NOT NULL AND (
-            (r.tipo_condicion = '=' AND re.resultado_numerico = r.valor_numerico_1) OR
-            (r.tipo_condicion = '<>' AND re.resultado_numerico != r.valor_numerico_1) OR
-            (r.tipo_condicion = '>' AND re.resultado_numerico > r.valor_numerico_1) OR
-            (r.tipo_condicion = '<' AND re.resultado_numerico < r.valor_numerico_1) OR
-            (r.tipo_condicion = '>=' AND re.resultado_numerico >= r.valor_numerico_1) OR
-            (r.tipo_condicion = '<=' AND re.resultado_numerico <= r.valor_numerico_1) OR
-            (r.tipo_condicion = 'ENTRE' AND re.resultado_numerico >= r.valor_numerico_1 AND re.resultado_numerico <= r.valor_numerico_2) OR
-            (r.tipo_condicion = 'FUERA_DE' AND (re.resultado_numerico < r.valor_numerico_1 OR re.resultado_numerico > r.valor_numerico_2))
+            (r.tipo_condicion = '=' AND lr.resultado_numerico = r.valor_numerico_1) OR
+            (r.tipo_condicion = '<>' AND lr.resultado_numerico != r.valor_numerico_1) OR
+            (r.tipo_condicion = '>' AND lr.resultado_numerico > r.valor_numerico_1) OR
+            (r.tipo_condicion = '<' AND lr.resultado_numerico < r.valor_numerico_1) OR
+            (r.tipo_condicion = '>=' AND lr.resultado_numerico >= r.valor_numerico_1) OR
+            (r.tipo_condicion = '<=' AND lr.resultado_numerico <= r.valor_numerico_1) OR
+            (r.tipo_condicion = 'ENTRE' AND lr.resultado_numerico >= r.valor_numerico_1 AND lr.resultado_numerico <= r.valor_numerico_2) OR
+            (r.tipo_condicion = 'FUERA_DE' AND (lr.resultado_numerico < r.valor_numerico_1 OR lr.resultado_numerico > r.valor_numerico_2))
           )) OR
           (r.valor_texto IS NOT NULL AND (
-            (r.tipo_condicion = '=' AND re.resultado_texto = r.valor_texto) OR
-            (r.tipo_condicion = '<>' AND re.resultado_texto != r.valor_texto)
+            (r.tipo_condicion = '=' AND lr.resultado_texto = r.valor_texto) OR
+            (r.tipo_condicion = '<>' AND lr.resultado_texto != r.valor_texto)
           ))
         )
       )
@@ -1925,11 +1940,21 @@ app.get('/api/dashboard/estadisticas', authMiddleware, async (c) => {
     for (const tipoEnsayoId in pieChartsData) {
       const chartData = pieChartsData[tipoEnsayoId];
       
-      // Count total measured for this specific test type
+      // Count total measured for this specific test type (only latest results per component)
       const totalMedidosQuery = `
-        SELECT COUNT(*) as total
-        FROM resultados_ensayos
-        WHERE id_tipo_ensayo = $1
+        SELECT COUNT(DISTINCT (id_mesa, id_componente_plantilla_1)) as total
+        FROM (
+          SELECT 
+            id_mesa,
+            id_componente_plantilla_1,
+            ROW_NUMBER() OVER (
+              PARTITION BY id_tipo_ensayo, id_mesa, id_componente_plantilla_1 
+              ORDER BY fecha_medicion DESC
+            ) as rn
+          FROM resultados_ensayos
+          WHERE id_tipo_ensayo = $1
+        ) latest_only
+        WHERE rn = 1
       `
       const totalMedidosResult = await pool.query(totalMedidosQuery, [tipoEnsayoId])
       const totalMedidos = parseInt(totalMedidosResult.rows[0].total)
