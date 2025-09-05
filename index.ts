@@ -2051,6 +2051,7 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
     const mesaTemplates = mesasResult.rows
     
     console.log(`📋 Found templates:`, mesaTemplates)
+    console.log(`📋 Templates count: ${mesaTemplates.length}`)
     
     // 2. Get latest test results for selected mesas
     const resultsQuery = `
@@ -2079,6 +2080,7 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
     })
     
     console.log(`📋 Created results map with ${resultsMap.size} entries`)
+    console.log(`📋 Results data rows: ${resultsData.rows.length}`)
     
     // 4. Create combined Excel workbook
     const combinedWorkbook = new ExcelJS.Workbook()
@@ -2094,24 +2096,34 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
       }
       
       console.log(`📋 Processing mesa ${mesaTemplate.id_mesa} with template ${mesaTemplate.nombre_plantilla}`)
+      console.log(`📋 Template path: ${templatePath}`)
       
       // Load template
       const templateWorkbook = new ExcelJS.Workbook()
       await templateWorkbook.xlsx.readFile(templatePath)
       
       // Get first worksheet from template
-      const templateWorksheet = templateWorkbook.getWorksheet(1)
+      const templateWorksheet = templateWorkbook.worksheets[0]
       if (!templateWorksheet) {
         console.warn(`⚠️ No worksheet found in template: ${mesaTemplate.nombre_plantilla}`)
         continue
       }
       
+      console.log(`📋 Worksheet found: ${templateWorksheet.name}`)
+      console.log(`📋 Template has ${templateWorkbook.worksheets.length} worksheets`)
+      
       // Add worksheet to combined workbook
       const newWorksheet = combinedWorkbook.addWorksheet(`Mesa_${mesaTemplate.id_mesa}`)
       
+      console.log(`📋 Created new worksheet: Mesa_${mesaTemplate.id_mesa}`)
+      
       // Copy template structure to new worksheet
+      let templateRowCount = 0
+      let templateCellCount = 0
       templateWorksheet.eachRow((row, rowNumber) => {
+        templateRowCount++
         row.eachCell((cell, colNumber) => {
+          templateCellCount++
           const newCell = newWorksheet.getCell(rowNumber, colNumber)
           
           // Copy value and style
@@ -2123,7 +2135,7 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
             try {
               const placeholderMatch = cell.value.match(/\{\{(.*?)\}\}/)
               if (placeholderMatch) {
-                const placeholder = JSON.parse(placeholderMatch[1])
+                const placeholder = JSON.parse(`{${placeholderMatch[1]}}`)
                 const { id_componente_plantilla, id_tipo_ensayo } = placeholder
                 
                 // Look up result in map
@@ -2153,6 +2165,8 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
         })
       })
       
+      console.log(`📋 Copied from template: ${templateRowCount} rows, ${templateCellCount} cells`)
+      
       // Copy column widths
       templateWorksheet.columns.forEach((column, index) => {
         if (column.width) {
@@ -2168,110 +2182,65 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
       })
     }
     
-    // 6. Convert to PDF
-    console.log(`📋 Converting Excel workbook to PDF...`)
+    // 6. Convert to PDF using LibreOffice
+    console.log(`📋 Converting Excel workbook to PDF using LibreOffice...`)
     
     // Write Excel to temporary file
     const tempExcelPath = path.join(process.cwd(), `temp_${Date.now()}.xlsx`)
     await combinedWorkbook.xlsx.writeFile(tempExcelPath)
+    console.log(`📋 Excel file written to: ${tempExcelPath}`)
     
-    // Use Puppeteer to convert each worksheet to PDF
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    })
+    // Create temporary directory for PDF output
+    const tempDir = path.join(process.cwd(), `temp_pdf_${Date.now()}`)
+    fs.mkdirSync(tempDir, { recursive: true })
     
-    const pdfBuffers = []
+    // Use LibreOffice to convert Excel to PDF
+    const { exec } = await import('child_process')
+    const { promisify } = await import('util')
+    const execAsync = promisify(exec)
     
-    for (let i = 1; i <= combinedWorkbook.worksheets.length; i++) {
-      const worksheet = combinedWorkbook.getWorksheet(i)
-      if (!worksheet) continue
+    try {
+      const libreOfficeCommand = `libreoffice --headless --convert-to pdf --outdir "${tempDir}" "${tempExcelPath}"`
+      console.log(`📋 Running LibreOffice: ${libreOfficeCommand}`)
       
-      console.log(`📋 Converting worksheet ${worksheet.name} to PDF...`)
+      const { stdout, stderr } = await execAsync(libreOfficeCommand)
+      console.log(`📋 LibreOffice stdout: ${stdout}`)
+      if (stderr) console.log(`📋 LibreOffice stderr: ${stderr}`)
       
-      // Create HTML representation of the worksheet
-      let html = `
-        <html>
-          <head>
-            <style>
-              body { font-family: Arial, sans-serif; margin: 20px; }
-              table { border-collapse: collapse; width: 100%; }
-              td { border: 1px solid #ccc; padding: 4px; text-align: center; }
-              .header { background-color: #f5f5f5; font-weight: bold; }
-            </style>
-          </head>
-          <body>
-            <h2>${worksheet.name}</h2>
-            <table>
-      `
+      // Find the generated PDF file
+      const pdfFileName = path.basename(tempExcelPath, '.xlsx') + '.pdf'
+      const pdfPath = path.join(tempDir, pdfFileName)
       
-      // Convert worksheet to HTML table
-      worksheet.eachRow((row, rowNumber) => {
-        html += '<tr>'
-        row.eachCell((cell, colNumber) => {
-          const cellValue = cell.value || ''
-          const isHeader = rowNumber <= 2 // Assume first 2 rows are headers
-          html += `<td class="${isHeader ? 'header' : ''}">${cellValue}</td>`
-        })
-        html += '</tr>'
-      })
+      if (!fs.existsSync(pdfPath)) {
+        throw new Error(`PDF file not generated: ${pdfPath}`)
+      }
       
-      html += '</table></body></html>'
+      console.log(`📋 PDF generated at: ${pdfPath}`)
       
-      // Create PDF from HTML
-      const page = await browser.newPage()
-      await page.setContent(html)
-      await page.emulateMediaType('print')
+      // Read the PDF file
+      const finalPdfBuffer = fs.readFileSync(pdfPath)
       
-      const pdfBuffer = await page.pdf({
-        format: 'A4',
-        landscape: true,
-        printBackground: true,
-        margin: {
-          top: '20px',
-          right: '20px',
-          bottom: '20px',
-          left: '20px'
+      // Clean up temporary files
+      fs.unlinkSync(tempExcelPath)
+      fs.rmSync(tempDir, { recursive: true, force: true })
+      
+      console.log(`📋 Cleanup completed`)
+      console.log(`📋 Excel template report generated successfully`)
+      
+      // 8. Return PDF
+      return new Response(finalPdfBuffer, {
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': `attachment; filename="informe-plantillas-${new Date().toISOString().split('T')[0]}.pdf"`
         }
       })
       
-      pdfBuffers.push(pdfBuffer)
-      await page.close()
+    } catch (error) {
+      // Clean up temporary files even if conversion fails
+      if (fs.existsSync(tempExcelPath)) fs.unlinkSync(tempExcelPath)
+      if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true })
+      throw error
     }
-    
-    await browser.close()
-    
-    // 7. Combine PDFs if multiple worksheets
-    let finalPdfBuffer
-    if (pdfBuffers.length === 1) {
-      finalPdfBuffer = pdfBuffers[0]
-    } else {
-      // Merge multiple PDFs
-      const mergedPdf = await PDFDocument.create()
-      
-      for (const pdfBuffer of pdfBuffers) {
-        const pdf = await PDFDocument.load(pdfBuffer)
-        const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices())
-        pages.forEach(page => mergedPdf.addPage(page))
-      }
-      
-      finalPdfBuffer = await mergedPdf.save()
-    }
-    
-    // Clean up temporary file
-    if (fs.existsSync(tempExcelPath)) {
-      fs.unlinkSync(tempExcelPath)
-    }
-    
-    console.log(`📋 Excel template report generated successfully`)
-    
-    // 8. Return PDF
-    return new Response(finalPdfBuffer, {
-      headers: {
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="informe-plantillas-${new Date().toISOString().split('T')[0]}.pdf"`
-      }
-    })
     
   } catch (error) {
     console.error('Error generating Excel template report:', error)
