@@ -2195,6 +2195,38 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
       } else {
         console.log(`📋 No merged cells found in template`)
       }
+      
+      // Copy images from template
+      if (templateWorksheet.getImages && templateWorksheet.getImages().length > 0) {
+        const templateImages = templateWorksheet.getImages()
+        console.log(`📋 Copying ${templateImages.length} images...`)
+        
+        templateImages.forEach((image, index) => {
+          try {
+            // Get image buffer from template workbook
+            const imageBuffer = templateWorkbook.getImage(image.imageId)
+            
+            // Add image to combined workbook
+            const imageId = combinedWorkbook.addImage({
+              buffer: imageBuffer.buffer,
+              extension: imageBuffer.extension
+            })
+            
+            // Add image to worksheet with same properties
+            newWorksheet.addImage(imageId, {
+              tl: image.range.tl,
+              br: image.range.br,
+              editAs: image.range.editAs
+            })
+            
+            console.log(`📋 Copied image ${index + 1}: ${image.range.tl.col}${image.range.tl.row} to ${image.range.br.col}${image.range.br.row}`)
+          } catch (error) {
+            console.warn(`⚠️ Could not copy image ${index + 1}:`, error.message)
+          }
+        })
+      } else {
+        console.log(`📋 No images found in template`)
+      }
     }
     
     // 5.5. Configure page settings for all worksheets
