@@ -2042,9 +2042,10 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
     
     // 1. Get template names for each mesa
     const mesasQuery = `
-      SELECT m.id_mesa, mp.nombre_plantilla
+      SELECT m.id_mesa, m.nombre_mesa, ct.nombre_ct, mp.nombre_plantilla
       FROM mesas m
       JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
+      JOIN cts ct ON m.id_ct = ct.id_ct
       WHERE m.id_mesa = ANY($1)
     `
     const mesasResult = await pool.query(mesasQuery, [ids_mesas])
@@ -2120,50 +2121,71 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
       // Copy template structure to new worksheet
       let templateRowCount = 0
       let templateCellCount = 0
-      templateWorksheet.eachRow((row, rowNumber) => {
-        templateRowCount++
-        row.eachCell((cell, colNumber) => {
-          templateCellCount++
-          const newCell = newWorksheet.getCell(rowNumber, colNumber)
+      
+      // First, copy all cells including empty ones with formatting
+      for (let rowNumber = 1; rowNumber <= templateWorksheet.rowCount; rowNumber++) {
+        const templateRow = templateWorksheet.getRow(rowNumber)
+        if (templateRow) {
+          templateRowCount++
           
-          // Copy value and style
-          newCell.value = cell.value
-          newCell.style = cell.style
-          
-          // Check if cell contains placeholder JSON
-          if (typeof cell.value === 'string' && cell.value.includes('{{')) {
-            try {
-              const placeholderMatch = cell.value.match(/\{\{(.*?)\}\}/)
-              if (placeholderMatch) {
-                const placeholder = JSON.parse(`{${placeholderMatch[1]}}`)
-                const { id_componente_plantilla, id_tipo_ensayo } = placeholder
-                
-                // Look up result in map
-                const key = `${mesaTemplate.id_mesa}-${id_componente_plantilla}-${id_tipo_ensayo}`
-                const result = resultsMap.get(key)
-                
-                if (result) {
-                  // Replace with actual value
-                  let value = result.numerico || result.booleano || result.texto || ''
-                  
-                  // Format boolean values
-                  if (result.booleano !== null) {
-                    value = result.booleano ? '✓' : '✗'
+          // Iterate through all columns, not just those with values
+          for (let colNumber = 1; colNumber <= templateWorksheet.columnCount; colNumber++) {
+            const templateCell = templateWorksheet.getCell(rowNumber, colNumber)
+            const newCell = newWorksheet.getCell(rowNumber, colNumber)
+            
+            // Always copy the style, even for empty cells
+            if (templateCell.style) {
+              newCell.style = templateCell.style
+              templateCellCount++
+            }
+            
+            // Copy value if it exists
+            if (templateCell.value !== null && templateCell.value !== undefined) {
+              newCell.value = templateCell.value
+            }
+            
+            // Check if cell contains placeholder JSON or @id_mesa_ct
+            if (typeof templateCell.value === 'string') {
+              if (templateCell.value.includes('@id_mesa_ct')) {
+                // Replace @id_mesa_ct with mesa info format
+                const mesaInfo = `${mesaTemplate.nombre_mesa} (CT: ${mesaTemplate.nombre_ct})`
+                newCell.value = templateCell.value.replace('@id_mesa_ct', mesaInfo)
+                console.log(`📋 Replaced @id_mesa_ct with: ${mesaInfo}`)
+              } else if (templateCell.value.includes('{{')) {
+                try {
+                  const placeholderMatch = templateCell.value.match(/\{\{(.*?)\}\}/)
+                  if (placeholderMatch) {
+                    const placeholder = JSON.parse(`{${placeholderMatch[1]}}`)
+                    const { id_componente_plantilla, id_tipo_ensayo } = placeholder
+                    
+                    // Look up result in map
+                    const key = `${mesaTemplate.id_mesa}-${id_componente_plantilla}-${id_tipo_ensayo}`
+                    const result = resultsMap.get(key)
+                    
+                    if (result) {
+                      // Replace with actual value
+                      let value = result.numerico || result.booleano || result.texto || ''
+                      
+                      // Format boolean values
+                      if (result.booleano !== null) {
+                        value = result.booleano ? '✓' : '✗'
+                      }
+                      
+                      newCell.value = value
+                    } else {
+                      // No result found, clear placeholder
+                      newCell.value = ''
+                    }
                   }
-                  
-                  newCell.value = value
-                } else {
-                  // No result found, clear placeholder
-                  newCell.value = ''
+                } catch (error) {
+                  console.warn(`⚠️ Invalid JSON placeholder in cell ${rowNumber}-${colNumber}: ${templateCell.value}`)
+                  // Keep original value if JSON parsing fails
                 }
               }
-            } catch (error) {
-              console.warn(`⚠️ Invalid JSON placeholder in cell ${rowNumber}-${colNumber}: ${cell.value}`)
-              // Keep original value if JSON parsing fails
             }
           }
-        })
-      })
+        }
+      }
       
       console.log(`📋 Copied from template: ${templateRowCount} rows, ${templateCellCount} cells`)
       
