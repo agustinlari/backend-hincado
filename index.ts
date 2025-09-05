@@ -2182,6 +2182,38 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
       })
     }
     
+    // 5.5. Configure page settings for all worksheets
+    console.log(`📋 Configuring page settings for ${combinedWorkbook.worksheets.length} worksheets...`)
+    
+    combinedWorkbook.worksheets.forEach((worksheet, index) => {
+      console.log(`📋 Setting page format for worksheet: ${worksheet.name}`)
+      
+      // Set page setup for landscape orientation and fit to one page
+      worksheet.pageSetup = {
+        paperSize: 9, // A4
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 1,
+        margins: {
+          left: 0.5,
+          right: 0.5, 
+          top: 0.5,
+          bottom: 0.5,
+          header: 0.3,
+          footer: 0.3
+        },
+        printArea: undefined, // Print entire sheet
+        showGridLines: false
+      }
+      
+      // Set print options
+      worksheet.headerFooter = {
+        oddHeader: '',
+        oddFooter: ''
+      }
+    })
+    
     // 6. Convert to PDF using LibreOffice
     console.log(`📋 Converting Excel workbook to PDF using LibreOffice...`)
     
