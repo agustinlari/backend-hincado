@@ -2180,6 +2180,21 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
           newWorksheet.getRow(rowNumber).height = row.height
         }
       })
+      
+      // Copy merged cells
+      if (templateWorksheet.model && templateWorksheet.model.merges) {
+        console.log(`📋 Copying ${templateWorksheet.model.merges.length} merged cells...`)
+        templateWorksheet.model.merges.forEach(merge => {
+          try {
+            newWorksheet.mergeCells(merge)
+            console.log(`📋 Merged cells: ${merge}`)
+          } catch (error) {
+            console.warn(`⚠️ Could not merge cells ${merge}:`, error.message)
+          }
+        })
+      } else {
+        console.log(`📋 No merged cells found in template`)
+      }
     }
     
     // 5.5. Configure page settings for all worksheets
