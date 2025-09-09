@@ -34,6 +34,336 @@ const pool = new Pool({
 
 app.get('/', (c) => c.text('¡Hola desde Hono backend!'))
 
+// Job management system for async report generation
+interface ReportJob {
+  id: string;
+  status: 'pending' | 'processing' | 'completed' | 'error';
+  data: any;
+  result?: Buffer;
+  error?: string;
+  createdAt: Date;
+  completedAt?: Date;
+}
+
+const reportJobs = new Map<string, ReportJob>();
+
+// Clean up completed jobs after 30 minutes
+setInterval(() => {
+  const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+  for (const [jobId, job] of reportJobs) {
+    if (job.completedAt && job.completedAt < thirtyMinutesAgo) {
+      reportJobs.delete(jobId);
+      console.log(`🧹 Cleaned up completed job: ${jobId}`);
+    }
+  }
+}, 5 * 60 * 1000); // Run cleanup every 5 minutes
+
+function generateJobId(): string {
+  return `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Extract the report generation logic into a reusable function
+async function generateExcelTemplateReport(ids_mesas: number[]): Promise<Buffer> {
+  console.log(`📋 Generating Excel template report for mesas: ${ids_mesas.join(', ')}`)
+  
+  // 1. Get template names for each mesa
+  const mesasQuery = `
+    SELECT m.id_mesa, m.nombre_mesa, ct.nombre_ct, mp.nombre_plantilla
+    FROM mesas m
+    JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
+    JOIN cts ct ON m.id_ct = ct.id_ct
+    WHERE m.id_mesa = ANY($1)
+  `
+  const mesasResult = await pool.query(mesasQuery, [ids_mesas])
+  const mesaTemplates = mesasResult.rows
+  
+  console.log(`📋 Found templates:`, mesaTemplates)
+  console.log(`📋 Templates count: ${mesaTemplates.length}`)
+  
+  // 2. Get latest test results for selected mesas
+  const resultsQuery = `
+    SELECT DISTINCT ON (id_mesa, id_componente_plantilla_1, id_tipo_ensayo)
+      id_mesa,
+      id_componente_plantilla_1,
+      id_tipo_ensayo,
+      resultado_numerico,
+      resultado_booleano,
+      resultado_texto
+    FROM resultados_ensayos
+    WHERE id_mesa = ANY($1)
+    ORDER BY id_mesa, id_componente_plantilla_1, id_tipo_ensayo, fecha_medicion DESC
+  `
+  const resultsData = await pool.query(resultsQuery, [ids_mesas])
+  
+  // 3. Create results map for quick lookup
+  const resultsMap = new Map()
+  resultsData.rows.forEach(row => {
+    const key = `${row.id_mesa}-${row.id_componente_plantilla_1}-${row.id_tipo_ensayo}`
+    resultsMap.set(key, {
+      numerico: row.resultado_numerico,
+      booleano: row.resultado_booleano,
+      texto: row.resultado_texto
+    })
+  })
+  
+  console.log(`📋 Created results map with ${resultsMap.size} entries`)
+  console.log(`📋 Results data rows: ${resultsData.rows.length}`)
+  
+  // 4. Create combined Excel workbook
+  const combinedWorkbook = new ExcelJS.Workbook()
+  
+  // 5. Process each mesa
+  for (const mesaTemplate of mesaTemplates) {
+    const templatePath = path.join(process.cwd(), 'templates', `${mesaTemplate.nombre_plantilla}.xlsx`)
+    
+    // Check if template file exists
+    if (!fs.existsSync(templatePath)) {
+      console.warn(`⚠️ Template not found: ${templatePath}`)
+      continue
+    }
+    
+    console.log(`📋 Processing mesa ${mesaTemplate.id_mesa} with template ${mesaTemplate.nombre_plantilla}`)
+    console.log(`📋 Template path: ${templatePath}`)
+    
+    // Load template
+    const templateWorkbook = new ExcelJS.Workbook()
+    await templateWorkbook.xlsx.readFile(templatePath)
+    
+    // Get first worksheet from template
+    const templateWorksheet = templateWorkbook.worksheets[0]
+    if (!templateWorksheet) {
+      console.warn(`⚠️ No worksheet found in template: ${mesaTemplate.nombre_plantilla}`)
+      continue
+    }
+    
+    console.log(`📋 Worksheet found: ${templateWorksheet.name}`)
+    console.log(`📋 Template has ${templateWorkbook.worksheets.length} worksheets`)
+    
+    // Add worksheet to combined workbook
+    const newWorksheet = combinedWorkbook.addWorksheet(`Mesa_${mesaTemplate.id_mesa}`)
+    
+    console.log(`📋 Created new worksheet: Mesa_${mesaTemplate.id_mesa}`)
+    
+    // Copy template structure to new worksheet
+    let templateRowCount = 0
+    let templateCellCount = 0
+    
+    // First, copy all cells including empty ones with formatting
+    for (let rowNumber = 1; rowNumber <= templateWorksheet.rowCount; rowNumber++) {
+      const templateRow = templateWorksheet.getRow(rowNumber)
+      if (templateRow) {
+        templateRowCount++
+        
+        // Iterate through all columns, not just those with values
+        for (let colNumber = 1; colNumber <= templateWorksheet.columnCount; colNumber++) {
+          const templateCell = templateWorksheet.getCell(rowNumber, colNumber)
+          const newCell = newWorksheet.getCell(rowNumber, colNumber)
+          
+          // Always copy the style, even for empty cells
+          if (templateCell.style) {
+            newCell.style = templateCell.style
+            templateCellCount++
+          }
+          
+          // Copy value if it exists
+          if (templateCell.value !== null && templateCell.value !== undefined) {
+            newCell.value = templateCell.value
+          }
+          
+          // Check if cell contains placeholder JSON or @id_mesa_ct
+          if (typeof templateCell.value === 'string') {
+            if (templateCell.value.includes('@id_mesa_ct')) {
+              // Replace @id_mesa_ct with mesa info format
+              const mesaInfo = `${mesaTemplate.nombre_mesa} (CT: ${mesaTemplate.nombre_ct})`
+              newCell.value = templateCell.value.replace('@id_mesa_ct', mesaInfo)
+              console.log(`📋 Replaced @id_mesa_ct with: ${mesaInfo}`)
+            } else if (templateCell.value.includes('{{')) {
+              try {
+                const placeholderMatch = templateCell.value.match(/\{\{(.*?)\}\}/)
+                if (placeholderMatch) {
+                  const placeholder = JSON.parse(`{${placeholderMatch[1]}}`)
+                  const { id_componente_plantilla, id_tipo_ensayo } = placeholder
+                  
+                  // Look up result in map
+                  const key = `${mesaTemplate.id_mesa}-${id_componente_plantilla}-${id_tipo_ensayo}`
+                  const result = resultsMap.get(key)
+                  
+                  if (result) {
+                    // Replace with actual value
+                    let value = result.numerico || result.booleano || result.texto || ''
+                    
+                    // Format boolean values
+                    if (result.booleano !== null) {
+                      value = result.booleano ? '✓' : '✗'
+                    }
+                    
+                    newCell.value = value
+                  } else {
+                    // No result found, clear placeholder
+                    newCell.value = ''
+                  }
+                }
+              } catch (error) {
+                console.warn(`⚠️ Invalid JSON placeholder in cell ${rowNumber}-${colNumber}: ${templateCell.value}`)
+                // Keep original value if JSON parsing fails
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    console.log(`📋 Copied from template: ${templateRowCount} rows, ${templateCellCount} cells`)
+    
+    // Copy column widths
+    templateWorksheet.columns.forEach((column, index) => {
+      if (column.width) {
+        newWorksheet.getColumn(index + 1).width = column.width
+      }
+    })
+    
+    // Copy row heights
+    templateWorksheet.eachRow((row, rowNumber) => {
+      if (row.height) {
+        newWorksheet.getRow(rowNumber).height = row.height
+      }
+    })
+    
+    // Copy merged cells
+    if (templateWorksheet.model && templateWorksheet.model.merges) {
+      console.log(`📋 Copying ${templateWorksheet.model.merges.length} merged cells...`)
+      templateWorksheet.model.merges.forEach(merge => {
+        try {
+          newWorksheet.mergeCells(merge)
+          console.log(`📋 Merged cells: ${merge}`)
+        } catch (error) {
+          console.warn(`⚠️ Could not merge cells ${merge}:`, error.message)
+        }
+      })
+    } else {
+      console.log(`📋 No merged cells found in template`)
+    }
+    
+    // Copy images from template
+    if (templateWorksheet.getImages && templateWorksheet.getImages().length > 0) {
+      const templateImages = templateWorksheet.getImages()
+      console.log(`📋 Copying ${templateImages.length} images...`)
+      
+      templateImages.forEach((image, index) => {
+        try {
+          // Get image buffer from template workbook
+          const imageBuffer = templateWorkbook.getImage(image.imageId)
+          
+          // Add image to combined workbook
+          const imageId = combinedWorkbook.addImage({
+            buffer: imageBuffer.buffer,
+            extension: imageBuffer.extension
+          })
+          
+          // Add image to worksheet with same properties
+          newWorksheet.addImage(imageId, {
+            tl: image.range.tl,
+            br: image.range.br,
+            editAs: image.range.editAs
+          })
+          
+          console.log(`📋 Copied image ${index + 1}: ${image.range.tl.col}${image.range.tl.row} to ${image.range.br.col}${image.range.br.row}`)
+        } catch (error) {
+          console.warn(`⚠️ Could not copy image ${index + 1}:`, error.message)
+        }
+      })
+    } else {
+      console.log(`📋 No images found in template`)
+    }
+  }
+  
+  // 5.5. Configure page settings for all worksheets
+  console.log(`📋 Configuring page settings for ${combinedWorkbook.worksheets.length} worksheets...`)
+  
+  combinedWorkbook.worksheets.forEach((worksheet, index) => {
+    console.log(`📋 Setting page format for worksheet: ${worksheet.name}`)
+    
+    // Set page setup for landscape orientation and fit to one page
+    worksheet.pageSetup = {
+      paperSize: 9, // A4
+      orientation: 'landscape',
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 1,
+      margins: {
+        left: 0.5,
+        right: 0.5, 
+        top: 0.5,
+        bottom: 0.5,
+        header: 0.3,
+        footer: 0.3
+      },
+      printArea: undefined, // Print entire sheet
+      showGridLines: false
+    }
+    
+    // Set print options
+    worksheet.headerFooter = {
+      oddHeader: '',
+      oddFooter: ''
+    }
+  })
+  
+  // 6. Convert to PDF using LibreOffice
+  console.log(`📋 Converting Excel workbook to PDF using LibreOffice...`)
+  
+  // Write Excel to temporary file
+  const tempExcelPath = path.join(process.cwd(), `temp_${Date.now()}.xlsx`)
+  await combinedWorkbook.xlsx.writeFile(tempExcelPath)
+  console.log(`📋 Excel file written to: ${tempExcelPath}`)
+  
+  // Create temporary directory for PDF output
+  const tempDir = path.join(process.cwd(), `temp_pdf_${Date.now()}`)
+  fs.mkdirSync(tempDir, { recursive: true })
+  
+  // Use LibreOffice to convert Excel to PDF
+  const { exec } = await import('child_process')
+  const { promisify } = await import('util')
+  const execAsync = promisify(exec)
+  
+  try {
+    const libreOfficeCommand = `libreoffice --headless --convert-to pdf --outdir "${tempDir}" "${tempExcelPath}"`
+    console.log(`📋 Running LibreOffice: ${libreOfficeCommand}`)
+    
+    const { stdout, stderr } = await execAsync(libreOfficeCommand)
+    console.log(`📋 LibreOffice stdout: ${stdout}`)
+    if (stderr) console.log(`📋 LibreOffice stderr: ${stderr}`)
+    
+    // Find the generated PDF file
+    const pdfFileName = path.basename(tempExcelPath, '.xlsx') + '.pdf'
+    const pdfPath = path.join(tempDir, pdfFileName)
+    
+    if (!fs.existsSync(pdfPath)) {
+      throw new Error(`PDF file not generated: ${pdfPath}`)
+    }
+    
+    console.log(`📋 PDF generated at: ${pdfPath}`)
+    
+    // Read the PDF file
+    const finalPdfBuffer = fs.readFileSync(pdfPath)
+    
+    // Clean up temporary files
+    fs.unlinkSync(tempExcelPath)
+    fs.rmSync(tempDir, { recursive: true, force: true })
+    
+    console.log(`📋 Cleanup completed`)
+    console.log(`📋 Excel template report generated successfully`)
+    
+    return finalPdfBuffer
+    
+  } catch (error) {
+    // Clean up temporary files even if conversion fails
+    if (fs.existsSync(tempExcelPath)) fs.unlinkSync(tempExcelPath)
+    if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true })
+    throw error
+  }
+}
+
 // Cache para las claves públicas de Keycloak
 let keycloakJWKS: jose.JSONWebKeySet | null = null;
 let jwksLastFetched = 0;
@@ -2029,7 +2359,132 @@ app.get('/api/mesas', authMiddleware, async (c) => {
   }
 })
 
-// Excel Template PDF Report Generator
+// New polling-based Excel Template PDF Report Generator endpoints
+
+// Start Excel report generation job
+app.post('/api/generar-informe-plantillas/start', authMiddleware, async (c) => {
+  try {
+    const { ids_mesas } = await c.req.json()
+    
+    if (!Array.isArray(ids_mesas) || ids_mesas.length === 0) {
+      return c.json({ error: 'ids_mesas must be a non-empty array' }, 400)
+    }
+
+    const jobId = generateJobId()
+    
+    // Create job in pending state
+    const job: ReportJob = {
+      id: jobId,
+      status: 'pending',
+      data: { ids_mesas },
+      createdAt: new Date()
+    }
+    
+    reportJobs.set(jobId, job)
+    
+    console.log(`📋 Started Excel report job ${jobId} for ${ids_mesas.length} mesas`)
+    
+    // Start async processing
+    processExcelReportJob(jobId).catch(error => {
+      console.error(`📋 Job ${jobId} failed:`, error)
+      const failedJob = reportJobs.get(jobId)
+      if (failedJob) {
+        failedJob.status = 'error'
+        failedJob.error = error.message
+        failedJob.completedAt = new Date()
+      }
+    })
+    
+    return c.json({ jobId })
+  } catch (error) {
+    console.error('Error starting Excel report job:', error)
+    return c.json({ error: 'Failed to start Excel report job', details: error.message }, 500)
+  }
+})
+
+// Check Excel report job status
+app.get('/api/generar-informe-plantillas/status/:jobId', authMiddleware, async (c) => {
+  try {
+    const jobId = c.req.param('jobId')
+    const job = reportJobs.get(jobId)
+    
+    if (!job) {
+      return c.json({ error: 'Job not found' }, 404)
+    }
+    
+    return c.json({ 
+      status: job.status,
+      error: job.error || null,
+      createdAt: job.createdAt,
+      completedAt: job.completedAt || null
+    })
+  } catch (error) {
+    console.error('Error checking Excel report job status:', error)
+    return c.json({ error: 'Failed to check job status', details: error.message }, 500)
+  }
+})
+
+// Download completed Excel report
+app.get('/api/generar-informe-plantillas/download/:jobId', authMiddleware, async (c) => {
+  try {
+    const jobId = c.req.param('jobId')
+    const job = reportJobs.get(jobId)
+    
+    if (!job) {
+      return c.json({ error: 'Job not found' }, 404)
+    }
+    
+    if (job.status !== 'completed') {
+      return c.json({ error: 'Job not completed yet' }, 400)
+    }
+    
+    if (!job.result) {
+      return c.json({ error: 'No result available' }, 500)
+    }
+    
+    // Return the PDF
+    return new Response(job.result as any, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="informe-plantillas-${new Date().toISOString().split('T')[0]}.pdf"`
+      }
+    })
+  } catch (error) {
+    console.error('Error downloading Excel report:', error)
+    return c.json({ error: 'Failed to download report', details: error.message }, 500)
+  }
+})
+
+// Async job processing function
+async function processExcelReportJob(jobId: string) {
+  const job = reportJobs.get(jobId)
+  if (!job) {
+    throw new Error(`Job ${jobId} not found`)
+  }
+  
+  try {
+    console.log(`📋 Processing Excel report job ${jobId}...`)
+    job.status = 'processing'
+    
+    // Generate the report using the extracted function
+    const pdfBuffer = await generateExcelTemplateReport(job.data.ids_mesas)
+    
+    // Store result
+    job.result = pdfBuffer
+    job.status = 'completed'
+    job.completedAt = new Date()
+    
+    console.log(`📋 Excel report job ${jobId} completed successfully`)
+  } catch (error) {
+    console.error(`📋 Excel report job ${jobId} failed:`, error)
+    job.status = 'error'
+    job.error = error.message
+    job.completedAt = new Date()
+    throw error
+  }
+}
+
+// Excel Template PDF Report Generator (original synchronous endpoint for backward compatibility)
 app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
   try {
     const { ids_mesas } = await c.req.json()
@@ -2038,310 +2493,18 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
       return c.json({ error: 'ids_mesas must be a non-empty array' }, 400)
     }
     
-    console.log(`📋 Generating Excel template report for mesas: ${ids_mesas.join(', ')}`)
+    console.log(`📋 [SYNC] Generating Excel template report for mesas: ${ids_mesas.join(', ')}`)
     
-    // 1. Get template names for each mesa
-    const mesasQuery = `
-      SELECT m.id_mesa, m.nombre_mesa, ct.nombre_ct, mp.nombre_plantilla
-      FROM mesas m
-      JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
-      JOIN cts ct ON m.id_ct = ct.id_ct
-      WHERE m.id_mesa = ANY($1)
-    `
-    const mesasResult = await pool.query(mesasQuery, [ids_mesas])
-    const mesaTemplates = mesasResult.rows
+    // Use the extracted function for report generation
+    const finalPdfBuffer = await generateExcelTemplateReport(ids_mesas)
     
-    console.log(`📋 Found templates:`, mesaTemplates)
-    console.log(`📋 Templates count: ${mesaTemplates.length}`)
-    
-    // 2. Get latest test results for selected mesas
-    const resultsQuery = `
-      SELECT DISTINCT ON (id_mesa, id_componente_plantilla_1, id_tipo_ensayo)
-        id_mesa,
-        id_componente_plantilla_1,
-        id_tipo_ensayo,
-        resultado_numerico,
-        resultado_booleano,
-        resultado_texto
-      FROM resultados_ensayos
-      WHERE id_mesa = ANY($1)
-      ORDER BY id_mesa, id_componente_plantilla_1, id_tipo_ensayo, fecha_medicion DESC
-    `
-    const resultsData = await pool.query(resultsQuery, [ids_mesas])
-    
-    // 3. Create results map for quick lookup
-    const resultsMap = new Map()
-    resultsData.rows.forEach(row => {
-      const key = `${row.id_mesa}-${row.id_componente_plantilla_1}-${row.id_tipo_ensayo}`
-      resultsMap.set(key, {
-        numerico: row.resultado_numerico,
-        booleano: row.resultado_booleano,
-        texto: row.resultado_texto
-      })
-    })
-    
-    console.log(`📋 Created results map with ${resultsMap.size} entries`)
-    console.log(`📋 Results data rows: ${resultsData.rows.length}`)
-    
-    // 4. Create combined Excel workbook
-    const combinedWorkbook = new ExcelJS.Workbook()
-    
-    // 5. Process each mesa
-    for (const mesaTemplate of mesaTemplates) {
-      const templatePath = path.join(process.cwd(), 'templates', `${mesaTemplate.nombre_plantilla}.xlsx`)
-      
-      // Check if template file exists
-      if (!fs.existsSync(templatePath)) {
-        console.warn(`⚠️ Template not found: ${templatePath}`)
-        continue
-      }
-      
-      console.log(`📋 Processing mesa ${mesaTemplate.id_mesa} with template ${mesaTemplate.nombre_plantilla}`)
-      console.log(`📋 Template path: ${templatePath}`)
-      
-      // Load template
-      const templateWorkbook = new ExcelJS.Workbook()
-      await templateWorkbook.xlsx.readFile(templatePath)
-      
-      // Get first worksheet from template
-      const templateWorksheet = templateWorkbook.worksheets[0]
-      if (!templateWorksheet) {
-        console.warn(`⚠️ No worksheet found in template: ${mesaTemplate.nombre_plantilla}`)
-        continue
-      }
-      
-      console.log(`📋 Worksheet found: ${templateWorksheet.name}`)
-      console.log(`📋 Template has ${templateWorkbook.worksheets.length} worksheets`)
-      
-      // Add worksheet to combined workbook
-      const newWorksheet = combinedWorkbook.addWorksheet(`Mesa_${mesaTemplate.id_mesa}`)
-      
-      console.log(`📋 Created new worksheet: Mesa_${mesaTemplate.id_mesa}`)
-      
-      // Copy template structure to new worksheet
-      let templateRowCount = 0
-      let templateCellCount = 0
-      
-      // First, copy all cells including empty ones with formatting
-      for (let rowNumber = 1; rowNumber <= templateWorksheet.rowCount; rowNumber++) {
-        const templateRow = templateWorksheet.getRow(rowNumber)
-        if (templateRow) {
-          templateRowCount++
-          
-          // Iterate through all columns, not just those with values
-          for (let colNumber = 1; colNumber <= templateWorksheet.columnCount; colNumber++) {
-            const templateCell = templateWorksheet.getCell(rowNumber, colNumber)
-            const newCell = newWorksheet.getCell(rowNumber, colNumber)
-            
-            // Always copy the style, even for empty cells
-            if (templateCell.style) {
-              newCell.style = templateCell.style
-              templateCellCount++
-            }
-            
-            // Copy value if it exists
-            if (templateCell.value !== null && templateCell.value !== undefined) {
-              newCell.value = templateCell.value
-            }
-            
-            // Check if cell contains placeholder JSON or @id_mesa_ct
-            if (typeof templateCell.value === 'string') {
-              if (templateCell.value.includes('@id_mesa_ct')) {
-                // Replace @id_mesa_ct with mesa info format
-                const mesaInfo = `${mesaTemplate.nombre_mesa} (CT: ${mesaTemplate.nombre_ct})`
-                newCell.value = templateCell.value.replace('@id_mesa_ct', mesaInfo)
-                console.log(`📋 Replaced @id_mesa_ct with: ${mesaInfo}`)
-              } else if (templateCell.value.includes('{{')) {
-                try {
-                  const placeholderMatch = templateCell.value.match(/\{\{(.*?)\}\}/)
-                  if (placeholderMatch) {
-                    const placeholder = JSON.parse(`{${placeholderMatch[1]}}`)
-                    const { id_componente_plantilla, id_tipo_ensayo } = placeholder
-                    
-                    // Look up result in map
-                    const key = `${mesaTemplate.id_mesa}-${id_componente_plantilla}-${id_tipo_ensayo}`
-                    const result = resultsMap.get(key)
-                    
-                    if (result) {
-                      // Replace with actual value
-                      let value = result.numerico || result.booleano || result.texto || ''
-                      
-                      // Format boolean values
-                      if (result.booleano !== null) {
-                        value = result.booleano ? '✓' : '✗'
-                      }
-                      
-                      newCell.value = value
-                    } else {
-                      // No result found, clear placeholder
-                      newCell.value = ''
-                    }
-                  }
-                } catch (error) {
-                  console.warn(`⚠️ Invalid JSON placeholder in cell ${rowNumber}-${colNumber}: ${templateCell.value}`)
-                  // Keep original value if JSON parsing fails
-                }
-              }
-            }
-          }
-        }
-      }
-      
-      console.log(`📋 Copied from template: ${templateRowCount} rows, ${templateCellCount} cells`)
-      
-      // Copy column widths
-      templateWorksheet.columns.forEach((column, index) => {
-        if (column.width) {
-          newWorksheet.getColumn(index + 1).width = column.width
-        }
-      })
-      
-      // Copy row heights
-      templateWorksheet.eachRow((row, rowNumber) => {
-        if (row.height) {
-          newWorksheet.getRow(rowNumber).height = row.height
-        }
-      })
-      
-      // Copy merged cells
-      if (templateWorksheet.model && templateWorksheet.model.merges) {
-        console.log(`📋 Copying ${templateWorksheet.model.merges.length} merged cells...`)
-        templateWorksheet.model.merges.forEach(merge => {
-          try {
-            newWorksheet.mergeCells(merge)
-            console.log(`📋 Merged cells: ${merge}`)
-          } catch (error) {
-            console.warn(`⚠️ Could not merge cells ${merge}:`, error.message)
-          }
-        })
-      } else {
-        console.log(`📋 No merged cells found in template`)
-      }
-      
-      // Copy images from template
-      if (templateWorksheet.getImages && templateWorksheet.getImages().length > 0) {
-        const templateImages = templateWorksheet.getImages()
-        console.log(`📋 Copying ${templateImages.length} images...`)
-        
-        templateImages.forEach((image, index) => {
-          try {
-            // Get image buffer from template workbook
-            const imageBuffer = templateWorkbook.getImage(image.imageId)
-            
-            // Add image to combined workbook
-            const imageId = combinedWorkbook.addImage({
-              buffer: imageBuffer.buffer,
-              extension: imageBuffer.extension
-            })
-            
-            // Add image to worksheet with same properties
-            newWorksheet.addImage(imageId, {
-              tl: image.range.tl,
-              br: image.range.br,
-              editAs: image.range.editAs
-            })
-            
-            console.log(`📋 Copied image ${index + 1}: ${image.range.tl.col}${image.range.tl.row} to ${image.range.br.col}${image.range.br.row}`)
-          } catch (error) {
-            console.warn(`⚠️ Could not copy image ${index + 1}:`, error.message)
-          }
-        })
-      } else {
-        console.log(`📋 No images found in template`)
-      }
-    }
-    
-    // 5.5. Configure page settings for all worksheets
-    console.log(`📋 Configuring page settings for ${combinedWorkbook.worksheets.length} worksheets...`)
-    
-    combinedWorkbook.worksheets.forEach((worksheet, index) => {
-      console.log(`📋 Setting page format for worksheet: ${worksheet.name}`)
-      
-      // Set page setup for landscape orientation and fit to one page
-      worksheet.pageSetup = {
-        paperSize: 9, // A4
-        orientation: 'landscape',
-        fitToPage: true,
-        fitToWidth: 1,
-        fitToHeight: 1,
-        margins: {
-          left: 0.5,
-          right: 0.5, 
-          top: 0.5,
-          bottom: 0.5,
-          header: 0.3,
-          footer: 0.3
-        },
-        printArea: undefined, // Print entire sheet
-        showGridLines: false
-      }
-      
-      // Set print options
-      worksheet.headerFooter = {
-        oddHeader: '',
-        oddFooter: ''
+    // Return PDF
+    return new Response(finalPdfBuffer as any, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="informe-plantillas-${new Date().toISOString().split('T')[0]}.pdf"`
       }
     })
-    
-    // 6. Convert to PDF using LibreOffice
-    console.log(`📋 Converting Excel workbook to PDF using LibreOffice...`)
-    
-    // Write Excel to temporary file
-    const tempExcelPath = path.join(process.cwd(), `temp_${Date.now()}.xlsx`)
-    await combinedWorkbook.xlsx.writeFile(tempExcelPath)
-    console.log(`📋 Excel file written to: ${tempExcelPath}`)
-    
-    // Create temporary directory for PDF output
-    const tempDir = path.join(process.cwd(), `temp_pdf_${Date.now()}`)
-    fs.mkdirSync(tempDir, { recursive: true })
-    
-    // Use LibreOffice to convert Excel to PDF
-    const { exec } = await import('child_process')
-    const { promisify } = await import('util')
-    const execAsync = promisify(exec)
-    
-    try {
-      const libreOfficeCommand = `libreoffice --headless --convert-to pdf --outdir "${tempDir}" "${tempExcelPath}"`
-      console.log(`📋 Running LibreOffice: ${libreOfficeCommand}`)
-      
-      const { stdout, stderr } = await execAsync(libreOfficeCommand)
-      console.log(`📋 LibreOffice stdout: ${stdout}`)
-      if (stderr) console.log(`📋 LibreOffice stderr: ${stderr}`)
-      
-      // Find the generated PDF file
-      const pdfFileName = path.basename(tempExcelPath, '.xlsx') + '.pdf'
-      const pdfPath = path.join(tempDir, pdfFileName)
-      
-      if (!fs.existsSync(pdfPath)) {
-        throw new Error(`PDF file not generated: ${pdfPath}`)
-      }
-      
-      console.log(`📋 PDF generated at: ${pdfPath}`)
-      
-      // Read the PDF file
-      const finalPdfBuffer = fs.readFileSync(pdfPath)
-      
-      // Clean up temporary files
-      fs.unlinkSync(tempExcelPath)
-      fs.rmSync(tempDir, { recursive: true, force: true })
-      
-      console.log(`📋 Cleanup completed`)
-      console.log(`📋 Excel template report generated successfully`)
-      
-      // 8. Return PDF
-      return new Response(finalPdfBuffer, {
-        headers: {
-          'Content-Type': 'application/pdf',
-          'Content-Disposition': `attachment; filename="informe-plantillas-${new Date().toISOString().split('T')[0]}.pdf"`
-        }
-      })
-      
-    } catch (error) {
-      // Clean up temporary files even if conversion fails
-      if (fs.existsSync(tempExcelPath)) fs.unlinkSync(tempExcelPath)
-      if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true })
-      throw error
-    }
     
   } catch (error) {
     console.error('Error generating Excel template report:', error)
