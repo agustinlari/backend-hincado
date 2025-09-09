@@ -2484,6 +2484,354 @@ async function processExcelReportJob(jobId: string) {
   }
 }
 
+// POT Template Report Generator Function
+async function generatePOTTemplateReport(ids_mesas: number[]): Promise<Buffer> {
+  console.log(`📋 Generating POT template report for mesas: ${ids_mesas.join(', ')}`)
+  
+  // 1. Get components with POT test results for selected mesas
+  const componentsQuery = `
+    SELECT DISTINCT 
+      m.id_mesa, 
+      m.nombre_mesa, 
+      ct.nombre_ct,
+      pc.id_componente,
+      pc.tipo_elemento,
+      pc.tipo_perfil,
+      pc.coord_x,
+      pc.coord_y,
+      pc.descripcion_punto_montaje
+    FROM mesas m
+    JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
+    JOIN plantilla_componentes pc ON mp.id_plantilla = pc.id_plantilla
+    JOIN cts ct ON m.id_ct = ct.id_ct
+    JOIN resultados_ensayos r ON r.id_mesa = m.id_mesa AND r.id_componente_plantilla_1 = pc.id_componente
+    JOIN tipos_ensayo te ON r.id_tipo_ensayo = te.id_tipo_ensayo
+    WHERE m.id_mesa = ANY($1) 
+      AND pc.tipo_perfil IS NOT NULL 
+      AND te.grupo_ensayo = 'POT'
+    ORDER BY m.id_mesa, pc.id_componente
+  `
+  const componentsResult = await pool.query(componentsQuery, [ids_mesas])
+  const componentsWithPOT = componentsResult.rows
+  
+  console.log(`📋 Found components with POT tests:`, componentsWithPOT.length)
+  console.log(`📋 Components details:`, componentsWithPOT)
+  
+  if (componentsWithPOT.length === 0) {
+    throw new Error('No se encontraron componentes con ensayos POT para las mesas seleccionadas')
+  }
+  
+  // 2. Get latest test results for all components (POT ensayos only)
+  const resultsQuery = `
+    SELECT DISTINCT ON (r.id_mesa, r.id_componente_plantilla_1, r.id_tipo_ensayo)
+      r.id_mesa,
+      r.id_componente_plantilla_1,
+      r.id_tipo_ensayo,
+      r.resultado_numerico,
+      r.resultado_booleano,
+      r.resultado_texto,
+      r.comentario,
+      r.fecha_medicion,
+      te.grupo_ensayo
+    FROM resultados_ensayos r
+    JOIN tipos_ensayo te ON r.id_tipo_ensayo = te.id_tipo_ensayo
+    WHERE r.id_mesa = ANY($1) AND te.grupo_ensayo = 'POT'
+    ORDER BY r.id_mesa, r.id_componente_plantilla_1, r.id_tipo_ensayo, r.fecha_medicion DESC
+  `
+  const resultsData = await pool.query(resultsQuery, [ids_mesas])
+  
+  // 3. Create results map for quick lookup
+  const resultsMap = new Map()
+  resultsData.rows.forEach(row => {
+    const key = `${row.id_mesa}-${row.id_componente_plantilla_1}-${row.id_tipo_ensayo}`
+    resultsMap.set(key, {
+      numerico: row.resultado_numerico,
+      booleano: row.resultado_booleano,
+      texto: row.resultado_texto,
+      comentario: row.comentario,
+      fecha_medicion: row.fecha_medicion
+    })
+  })
+  
+  console.log(`📋 Created POT results map with ${resultsMap.size} entries`)
+  
+  // 4. Create combined Excel workbook
+  const combinedWorkbook = new ExcelJS.Workbook()
+  
+  // 5. Process each component that has POT tests
+  for (const component of componentsWithPOT) {
+    const templatePath = path.join(process.cwd(), 'templates', `${component.tipo_perfil}.xlsx`)
+    
+    // Check if template file exists
+    if (!fs.existsSync(templatePath)) {
+      console.warn(`⚠️ POT Template not found: ${templatePath}`)
+      continue
+    }
+    
+    console.log(`📋 Processing component ${component.id_componente} from mesa ${component.id_mesa} with POT template ${component.tipo_perfil}`)
+    
+    // Load template
+    const templateWorkbook = new ExcelJS.Workbook()
+    await templateWorkbook.xlsx.readFile(templatePath)
+    
+    // Get first worksheet from template
+    const templateWorksheet = templateWorkbook.worksheets[0]
+    if (!templateWorksheet) {
+      console.warn(`⚠️ No worksheet found in POT template: ${component.tipo_perfil}`)
+      continue
+    }
+    
+    // Add worksheet to combined workbook - one sheet per component
+    const newWorksheet = combinedWorkbook.addWorksheet(`Mesa_${component.nombre_mesa}_Comp_${component.id_componente}`)
+    
+    console.log(`📋 Created new POT worksheet: Mesa_${component.nombre_mesa}_Comp_${component.id_componente}`)
+    
+    // Copy template structure to new worksheet (same as HINCAS but with POT-specific processing)
+    for (let rowNumber = 1; rowNumber <= templateWorksheet.rowCount; rowNumber++) {
+      const templateRow = templateWorksheet.getRow(rowNumber)
+      if (templateRow) {
+        for (let colNumber = 1; colNumber <= templateWorksheet.columnCount; colNumber++) {
+          const templateCell = templateWorksheet.getCell(rowNumber, colNumber)
+          const newCell = newWorksheet.getCell(rowNumber, colNumber)
+          
+          // Copy style
+          if (templateCell.style) {
+            newCell.style = templateCell.style
+          }
+          
+          // Copy value if it exists
+          if (templateCell.value !== null && templateCell.value !== undefined) {
+            newCell.value = templateCell.value
+          }
+          
+          // Check if cell contains POT-specific placeholders
+          if (typeof templateCell.value === 'string') {
+            const cellValue = templateCell.value
+            
+            // Replace common placeholders using THIS specific component's data
+            if (cellValue.includes('[fecha]')) {
+              // Get any result from this component to extract the date
+              const componentResultKey = Array.from(resultsMap.keys()).find(key => 
+                key.startsWith(`${component.id_mesa}-${component.id_componente}-`)
+              )
+              const fechaResult = componentResultKey ? resultsMap.get(componentResultKey) : null
+              const fecha = fechaResult?.fecha_medicion ? new Date(fechaResult.fecha_medicion).toLocaleDateString('es-ES') : ''
+              newCell.value = cellValue.replace('[fecha]', fecha)
+            } else if (cellValue.includes('[perfil]')) {
+              newCell.value = cellValue.replace('[perfil]', component.tipo_perfil)
+            } else if (cellValue.includes('[hinca]')) {
+              const hincaInfo = component.descripcion_punto_montaje || `Componente ${component.id_componente}`
+              newCell.value = cellValue.replace('[hinca]', hincaInfo)
+            } else if (cellValue.includes('[profundidad_hinca]')) {
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-21`)
+              newCell.value = cellValue.replace('[profundidad_hinca]', result?.numerico || '')
+            } else if (cellValue.includes('[diametro_taladro]')) {
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-22`)
+              newCell.value = cellValue.replace('[diametro_taladro]', result?.numerico || '')
+            } else if (cellValue.includes('[altura_aplicacion_carga]')) {
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-23`)
+              newCell.value = cellValue.replace('[altura_aplicacion_carga]', result?.numerico || '')
+            } else if (cellValue.includes('[v_carga_aplicada]')) {
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-24`)
+              newCell.value = cellValue.replace('[v_carga_aplicada]', result?.numerico || '')
+            } else if (cellValue.includes('[v_lect_comparador_inf_T1]')) {
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-25`)
+              newCell.value = cellValue.replace('[v_lect_comparador_inf_T1]', result?.numerico || '')
+            } else if (cellValue.includes('[v_lect_comparador_inf_T2]')) {
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-26`)
+              newCell.value = cellValue.replace('[v_lect_comparador_inf_T2]', result?.numerico || '')
+            } else if (cellValue.includes('[v_comentario]')) {
+              // Concatenar comentarios de medidas verticales (v) con salto de línea
+              const vComments = []
+              const ids_tipos_v = [24, 25, 26] // tipos de ensayo verticales
+              ids_tipos_v.forEach(id_tipo => {
+                const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-${id_tipo}`)
+                if (result?.comentario) {
+                  vComments.push(result.comentario)
+                }
+              })
+              newCell.value = cellValue.replace('[v_comentario]', vComments.join('\n'))
+            } else if (cellValue.includes('[v_valido]')) {
+              // Campo calculado basado en T1 y T2 de este componente específico
+              const resultT1 = resultsMap.get(`${component.id_mesa}-${component.id_componente}-25`)
+              const resultT2 = resultsMap.get(`${component.id_mesa}-${component.id_componente}-26`)
+              const isValid = (resultT1?.numerico !== null && resultT1?.numerico !== undefined) && 
+                             (resultT2?.numerico !== null && resultT2?.numerico !== undefined)
+              newCell.value = cellValue.replace('[v_valido]', isValid ? '✓' : '✗')
+            } else if (cellValue.includes('[c_carga_aplicada]')) {
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-31`)
+              newCell.value = cellValue.replace('[c_carga_aplicada]', result?.numerico || '')
+            } else if (cellValue.includes('[c_lect_comparador_inf_T1]')) {
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-29`)
+              newCell.value = cellValue.replace('[c_lect_comparador_inf_T1]', result?.numerico || '')
+            } else if (cellValue.includes('[c_lect_comparador_inf_T2]')) {
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-26`)
+              newCell.value = cellValue.replace('[c_lect_comparador_inf_T2]', result?.numerico || '')
+            } else if (cellValue.includes('[c_valido]')) {
+              // Campo calculado basado en cortantes T1 y T2 de este componente específico
+              const resultT1 = resultsMap.get(`${component.id_mesa}-${component.id_componente}-29`)
+              const resultT2 = resultsMap.get(`${component.id_mesa}-${component.id_componente}-26`)
+              const isValid = (resultT1?.numerico !== null && resultT1?.numerico !== undefined) && 
+                             (resultT2?.numerico !== null && resultT2?.numerico !== undefined)
+              newCell.value = cellValue.replace('[c_valido]', isValid ? '✓' : '✗')
+            } else if (cellValue.includes('[c_comentario]')) {
+              // Concatenar comentarios de medidas cortantes (c) con salto de línea
+              const cComments = []
+              const ids_tipos_c = [31, 29, 26] // tipos de ensayo cortantes (actualizado 27→31)
+              ids_tipos_c.forEach(id_tipo => {
+                const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-${id_tipo}`)
+                if (result?.comentario) {
+                  cComments.push(result.comentario)
+                }
+              })
+              newCell.value = cellValue.replace('[c_comentario]', cComments.join('\n'))
+            }
+          }
+        }
+      }
+    }
+    
+    // Copy column widths, row heights, and merged cells (same as HINCAS)
+    templateWorksheet.columns.forEach((column, index) => {
+      if (column.width) {
+        newWorksheet.getColumn(index + 1).width = column.width
+      }
+    })
+    
+    templateWorksheet.eachRow((row, rowNumber) => {
+      if (row.height) {
+        newWorksheet.getRow(rowNumber).height = row.height
+      }
+    })
+    
+    if (templateWorksheet.model && templateWorksheet.model.merges) {
+      templateWorksheet.model.merges.forEach(merge => {
+        try {
+          newWorksheet.mergeCells(merge)
+        } catch (error) {
+          console.warn(`⚠️ Could not merge cells ${merge}:`, error.message)
+        }
+      })
+    }
+    
+    // Copy images if any
+    if (templateWorksheet.getImages && templateWorksheet.getImages().length > 0) {
+      const templateImages = templateWorksheet.getImages()
+      templateImages.forEach((image, index) => {
+        try {
+          const imageBuffer = templateWorkbook.getImage(image.imageId)
+          const imageId = combinedWorkbook.addImage({
+            buffer: imageBuffer.buffer,
+            extension: imageBuffer.extension
+          })
+          newWorksheet.addImage(imageId, {
+            tl: image.range.tl,
+            br: image.range.br,
+          })
+        } catch (error) {
+          console.warn(`⚠️ Could not copy image ${index}:`, error.message)
+        }
+      })
+    }
+  }
+  
+  // 6. Set page setup for each worksheet - LANDSCAPE and fit to one page
+  combinedWorkbook.eachSheet((worksheet) => {
+    worksheet.pageSetup = {
+      orientation: 'landscape',  // Formato apaisado
+      paperSize: 9, // A4
+      margins: {
+        left: 0.5,    // Márgenes más pequeños para aprovechar espacio
+        right: 0.5,
+        top: 0.5,
+        bottom: 0.5,
+        header: 0.2,
+        footer: 0.2
+      },
+      printArea: undefined, // Print entire sheet
+      showGridLines: false,
+      fitToPage: true,      // Ajustar a página
+      fitToWidth: 1,        // Ajustar ancho a 1 página
+      fitToHeight: 1,       // Ajustar alto a 1 página
+      scale: undefined      // No usar escala fija cuando se usa fitToPage
+    }
+    
+    // Set print options
+    worksheet.headerFooter = {
+      oddHeader: '',
+      oddFooter: ''
+    }
+  })
+  
+  // 7. Convert to PDF using LibreOffice
+  console.log(`📋 Converting POT Excel workbook to PDF using LibreOffice...`)
+  
+  // Write Excel to temporary file
+  const tempExcelPath = path.join(process.cwd(), `temp_pot_${Date.now()}.xlsx`)
+  await combinedWorkbook.xlsx.writeFile(tempExcelPath)
+  console.log(`📋 POT Excel file written to: ${tempExcelPath}`)
+  
+  // Create temporary directory for PDF output
+  const tempDir = path.join(process.cwd(), `temp_pot_pdf_${Date.now()}`)
+  fs.mkdirSync(tempDir, { recursive: true })
+  
+  // Use LibreOffice to convert Excel to PDF
+  const { exec } = await import('child_process')
+  const { promisify } = await import('util')
+  const execAsync = promisify(exec)
+  
+  try {
+    const libreOfficeCommand = `libreoffice --headless --convert-to pdf --outdir "${tempDir}" "${tempExcelPath}"`
+    console.log(`📋 Running LibreOffice for POT: ${libreOfficeCommand}`)
+    
+    const { stdout, stderr } = await execAsync(libreOfficeCommand)
+    console.log(`📋 LibreOffice POT stdout: ${stdout}`)
+    if (stderr) console.log(`📋 LibreOffice POT stderr: ${stderr}`)
+    
+    // Find the generated PDF file
+    const pdfFileName = path.basename(tempExcelPath, '.xlsx') + '.pdf'
+    const pdfPath = path.join(tempDir, pdfFileName)
+    
+    if (!fs.existsSync(pdfPath)) {
+      throw new Error(`POT PDF file not generated: ${pdfPath}`)
+    }
+    
+    console.log(`📋 POT PDF generated at: ${pdfPath}`)
+    
+    // Read the PDF file
+    const finalPdfBuffer = fs.readFileSync(pdfPath)
+    
+    // Clean up temporary files and directories
+    try {
+      fs.unlinkSync(tempExcelPath)
+      fs.unlinkSync(pdfPath)
+      fs.rmdirSync(tempDir)
+    } catch (error) {
+      console.warn(`📋 Warning: Could not clean up POT temp files:`, error.message)
+    }
+    
+    console.log(`📋 POT PDF conversion completed successfully`)
+    return finalPdfBuffer
+    
+  } catch (error) {
+    console.error(`📋 Error converting POT Excel to PDF:`, error)
+    
+    // Clean up on error
+    try {
+      if (fs.existsSync(tempExcelPath)) fs.unlinkSync(tempExcelPath)
+      if (fs.existsSync(tempDir)) {
+        const files = fs.readdirSync(tempDir)
+        files.forEach(file => fs.unlinkSync(path.join(tempDir, file)))
+        fs.rmdirSync(tempDir)
+      }
+    } catch (cleanupError) {
+      console.warn(`📋 Warning: Could not clean up POT temp files after error:`, cleanupError.message)
+    }
+    
+    throw error
+  }
+}
+
 // Excel Template PDF Report Generator (original synchronous endpoint for backward compatibility)
 app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
   try {
@@ -2511,6 +2859,157 @@ app.post('/api/generar-informe-plantillas', authMiddleware, async (c) => {
     return c.json({ error: 'Failed to generate Excel template report', details: error.message }, 500)
   }
 })
+
+// POT Template PDF Report Generator endpoints
+// Start POT report generation job
+app.post('/api/generar-informe-pot-plantillas/start', authMiddleware, async (c) => {
+  try {
+    const { ids_mesas } = await c.req.json()
+    
+    if (!Array.isArray(ids_mesas) || ids_mesas.length === 0) {
+      return c.json({ error: 'ids_mesas must be a non-empty array' }, 400)
+    }
+    const jobId = generateJobId()
+    
+    // Create job in pending state
+    const job: ReportJob = {
+      id: jobId,
+      status: 'pending',
+      data: { ids_mesas },
+      createdAt: new Date()
+    }
+    
+    reportJobs.set(jobId, job)
+    
+    console.log(`📋 Started POT report job ${jobId} for ${ids_mesas.length} mesas`)
+    
+    // Start async processing
+    processPOTReportJob(jobId).catch(error => {
+      console.error(`📋 POT Job ${jobId} failed:`, error)
+      const failedJob = reportJobs.get(jobId)
+      if (failedJob) {
+        failedJob.status = 'error'
+        failedJob.error = error.message
+        failedJob.completedAt = new Date()
+      }
+    })
+    
+    return c.json({ jobId })
+  } catch (error) {
+    console.error('Error starting POT report job:', error)
+    return c.json({ error: 'Failed to start POT report job', details: error.message }, 500)
+  }
+})
+
+// Check POT report job status
+app.get('/api/generar-informe-pot-plantillas/status/:jobId', authMiddleware, async (c) => {
+  try {
+    const jobId = c.req.param('jobId')
+    const job = reportJobs.get(jobId)
+    
+    if (!job) {
+      return c.json({ error: 'Job not found' }, 404)
+    }
+    
+    return c.json({ 
+      status: job.status,
+      error: job.error || null,
+      createdAt: job.createdAt,
+      completedAt: job.completedAt || null
+    })
+  } catch (error) {
+    console.error('Error checking POT report job status:', error)
+    return c.json({ error: 'Failed to check job status', details: error.message }, 500)
+  }
+})
+
+// Download completed POT report
+app.get('/api/generar-informe-pot-plantillas/download/:jobId', authMiddleware, async (c) => {
+  try {
+    const jobId = c.req.param('jobId')
+    const job = reportJobs.get(jobId)
+    
+    if (!job) {
+      return c.json({ error: 'Job not found' }, 404)
+    }
+    
+    if (job.status !== 'completed') {
+      return c.json({ error: 'Job not completed yet' }, 400)
+    }
+    
+    if (!job.result) {
+      return c.json({ error: 'No result available' }, 500)
+    }
+    
+    // Return the PDF
+    return new Response(job.result as any, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="informe-pot-${new Date().toISOString().split('T')[0]}.pdf"`
+      }
+    })
+  } catch (error) {
+    console.error('Error downloading POT report:', error)
+    return c.json({ error: 'Failed to download report', details: error.message }, 500)
+  }
+})
+
+// POT Template PDF Report Generator (synchronous endpoint for backward compatibility)
+app.post('/api/generar-informe-pot-plantillas', authMiddleware, async (c) => {
+  try {
+    const { ids_mesas } = await c.req.json()
+    
+    if (!Array.isArray(ids_mesas) || ids_mesas.length === 0) {
+      return c.json({ error: 'ids_mesas must be a non-empty array' }, 400)
+    }
+    
+    console.log(`📋 [SYNC] Generating POT template report for mesas: ${ids_mesas.join(', ')}`)
+    
+    // Use the extracted function for report generation
+    const finalPdfBuffer = await generatePOTTemplateReport(ids_mesas)
+    
+    // Return PDF
+    return new Response(finalPdfBuffer as any, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="informe-pot-${new Date().toISOString().split('T')[0]}.pdf"`
+      }
+    })
+    
+  } catch (error) {
+    console.error('Error generating POT template report:', error)
+    return c.json({ error: 'Failed to generate POT template report', details: error.message }, 500)
+  }
+})
+
+// Async POT job processing function
+async function processPOTReportJob(jobId: string) {
+  const job = reportJobs.get(jobId)
+  if (!job) {
+    throw new Error(`Job ${jobId} not found`)
+  }
+  
+  try {
+    console.log(`📋 Processing POT report job ${jobId}...`)
+    job.status = 'processing'
+    
+    // Generate the report using the POT function
+    const pdfBuffer = await generatePOTTemplateReport(job.data.ids_mesas)
+    
+    // Store result
+    job.result = pdfBuffer
+    job.status = 'completed'
+    job.completedAt = new Date()
+    
+    console.log(`📋 POT report job ${jobId} completed successfully`)
+  } catch (error) {
+    console.error(`📋 POT report job ${jobId} failed:`, error)
+    job.status = 'error'
+    job.error = error.message
+    job.completedAt = new Date()
+    throw error
+  }
+}
 
 // Report generation endpoints
 app.get('/api/inspecciones', authMiddleware, async (c) => {
