@@ -2558,7 +2558,10 @@ async function generatePOTTemplateReport(ids_mesas: number[]): Promise<Buffer> {
   // 4. Create combined Excel workbook
   const combinedWorkbook = new ExcelJS.Workbook()
   
-  // 5. Process each component that has POT tests
+  // 5. Initialize inspection counter for correlative numbering
+  let inspectionCounter = 0
+  
+  // 6. Process each component that has POT tests
   for (const component of componentsWithPOT) {
     const templatePath = path.join(process.cwd(), 'templates', `${component.tipo_perfil}.xlsx`)
     
@@ -2584,7 +2587,10 @@ async function generatePOTTemplateReport(ids_mesas: number[]): Promise<Buffer> {
     // Add worksheet to combined workbook - one sheet per component
     const newWorksheet = combinedWorkbook.addWorksheet(`Mesa_${component.nombre_mesa}_Comp_${component.id_componente}`)
     
-    console.log(`📋 Created new POT worksheet: Mesa_${component.nombre_mesa}_Comp_${component.id_componente}`)
+    // Increment inspection counter for this sheet
+    inspectionCounter++
+    
+    console.log(`📋 Created new POT worksheet: Mesa_${component.nombre_mesa}_Comp_${component.id_componente} (Inspection #${inspectionCounter})`)
     
     // Copy template structure to new worksheet (same as HINCAS but with POT-specific processing)
     for (let rowNumber = 1; rowNumber <= templateWorksheet.rowCount; rowNumber++) {
@@ -2620,8 +2626,10 @@ async function generatePOTTemplateReport(ids_mesas: number[]): Promise<Buffer> {
             } else if (cellValue.includes('[perfil]')) {
               newCell.value = cellValue.replace('[perfil]', component.tipo_perfil)
             } else if (cellValue.includes('[hinca]')) {
-              const hincaInfo = component.descripcion_punto_montaje || `Componente ${component.id_componente}`
+              const hincaInfo = `Mesa: ${component.nombre_mesa}, ${component.nombre_ct} - ${component.descripcion_punto_montaje}`
               newCell.value = cellValue.replace('[hinca]', hincaInfo)
+            } else if (cellValue.includes('[inspeccion]')) {
+              newCell.value = cellValue.replace('[inspeccion]', inspectionCounter.toString())
             } else if (cellValue.includes('[profundidad_hinca]')) {
               const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-21`)
               newCell.value = cellValue.replace('[profundidad_hinca]', result?.numerico || '')
