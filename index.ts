@@ -1756,111 +1756,7 @@ app.post('/api/resultados-ensayos', authMiddleware, async (c) => {
       }, 400)
     }
 
-    // Special logic for Corte hinca (id=32)
-    if (id_tipo_ensayo === 32) {
-      // Check if Altura hinca (id=2) exists for this component
-      const alturaHincaQuery = `
-        SELECT resultado_numerico
-        FROM resultados_ensayos
-        WHERE id_tipo_ensayo = 2
-          AND id_mesa = $1
-          AND id_componente_plantilla_1 = $2
-        ORDER BY fecha_medicion DESC, id_resultado DESC
-        LIMIT 1
-      `
-
-      const alturaHincaResult = await pool.query(alturaHincaQuery, [id_mesa, id_componente_plantilla_1])
-
-      if (alturaHincaResult.rows.length === 0) {
-        return c.json({
-          error: 'No se puede registrar un Corte hinca sin un ensayo de Altura hinca previo para este componente'
-        }, 400)
-      }
-
-      const alturaActual = parseFloat(alturaHincaResult.rows[0].resultado_numerico)
-      // Treat null/empty resultado_numerico as 0 for calculations
-      const corteNuevo = resultado_numerico == null || resultado_numerico === '' ? 0 : parseFloat(resultado_numerico)
-
-      // Check if there's already a Corte hinca for this component
-      const corteExistenteQuery = `
-        SELECT resultado_numerico
-        FROM resultados_ensayos
-        WHERE id_tipo_ensayo = 32
-          AND id_mesa = $1
-          AND id_componente_plantilla_1 = $2
-        ORDER BY fecha_medicion DESC, id_resultado DESC
-        LIMIT 1
-      `
-
-      const corteExistenteResult = await pool.query(corteExistenteQuery, [id_mesa, id_componente_plantilla_1])
-
-      let nuevaAltura
-      if (corteExistenteResult.rows.length > 0) {
-        // Ya existe un corte previo - calculamos la diferencia
-        // Treat null resultado_numerico as 0 for calculations
-        const corteAnteriorRaw = corteExistenteResult.rows[0].resultado_numerico
-        const corteAnterior = corteAnteriorRaw == null ? 0 : parseFloat(corteAnteriorRaw)
-        const diferencia = corteAnterior - corteNuevo
-        nuevaAltura = alturaActual + diferencia
-        console.log(`🔧 Actualizando Corte hinca: anterior=${corteAnterior} (raw: ${corteAnteriorRaw}), nuevo=${corteNuevo} (raw: ${resultado_numerico}), diferencia=${diferencia}, nueva altura=${nuevaAltura}`)
-      } else {
-        // Primer corte - restamos del altura actual
-        nuevaAltura = alturaActual - corteNuevo
-        console.log(`🔧 Primer Corte hinca: altura actual=${alturaActual}, corte=${corteNuevo} (raw: ${resultado_numerico}), nueva altura=${nuevaAltura}`)
-      }
-
-      // Begin transaction for atomic updates
-      await pool.query('BEGIN')
-
-      try {
-        // Insert/update the Corte hinca result
-        const query = `
-          INSERT INTO resultados_ensayos (
-            id_inspeccion, id_tipo_ensayo, id_mesa,
-            id_componente_plantilla_1, id_componente_plantilla_2,
-            resultado_numerico, resultado_booleano, resultado_texto, comentario
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-          RETURNING *
-        `
-
-        const result = await pool.query(query, [
-          id_inspeccion, id_tipo_ensayo, id_mesa,
-          id_componente_plantilla_1, id_componente_plantilla_2,
-          resultado_numerico, resultado_booleano, resultado_texto, comentario
-        ])
-
-        // Update Altura hinca with the new calculated value
-        const updateAlturaQuery = `
-          INSERT INTO resultados_ensayos (
-            id_inspeccion, id_tipo_ensayo, id_mesa,
-            id_componente_plantilla_1, id_componente_plantilla_2,
-            resultado_numerico, resultado_booleano, resultado_texto,
-            comentario
-          )
-          VALUES ($1, 2, $2, $3, $4, $5, NULL, NULL, $6)
-        `
-
-        await pool.query(updateAlturaQuery, [
-          id_inspeccion, id_mesa, id_componente_plantilla_1, id_componente_plantilla_2,
-          nuevaAltura, `Actualizada automáticamente por Corte hinca: ${resultado_numerico}`
-        ])
-
-        await pool.query('COMMIT')
-
-        return c.json({
-          success: true,
-          resultado: result.rows[0],
-          altura_actualizada: nuevaAltura,
-          message: 'Corte hinca guardado y Altura hinca actualizada exitosamente'
-        })
-      } catch (error) {
-        await pool.query('ROLLBACK')
-        throw error
-      }
-    }
-
-    // Regular ensayo logic (not Corte hinca)
+    // All ensayos use the same logic now
     const query = `
       INSERT INTO resultados_ensayos (
         id_inspeccion, id_tipo_ensayo, id_mesa,
@@ -2113,6 +2009,61 @@ app.get('/api/resultados-ensayos/latest', authMiddleware, async (c) => {
   } catch (error) {
     console.error('Error fetching latest test results:', error)
     return c.json({ error: 'Failed to fetch latest test results' }, 500)
+  }
+})
+
+// Delete the latest resultado for a specific mesa and tipo_ensayo
+app.delete('/api/resultados-ensayos', authMiddleware, async (c) => {
+  try {
+    const body = await c.req.json()
+    const { id_mesa, id_componente, id_tipo_ensayo } = body
+
+    if (!id_mesa || !id_componente || !id_tipo_ensayo) {
+      return c.json({ error: 'Missing required parameters: id_mesa, id_componente, id_tipo_ensayo' }, 400)
+    }
+
+    const client = await pool.connect()
+
+    try {
+      await client.query('BEGIN')
+
+      // Find the latest resultado for this mesa/componente/tipo_ensayo combination
+      const latestQuery = `
+        SELECT id_resultado, resultado_numerico
+        FROM resultados_ensayos
+        WHERE id_mesa = $1 AND id_componente_plantilla_1 = $2 AND id_tipo_ensayo = $3
+        ORDER BY fecha_medicion DESC, id_resultado DESC
+        LIMIT 1
+      `
+      const latestResult = await client.query(latestQuery, [id_mesa, id_componente, id_tipo_ensayo])
+
+      if (latestResult.rows.length === 0) {
+        await client.query('ROLLBACK')
+        return c.json({ error: 'No resultado found to delete' }, 404)
+      }
+
+      const resultadoToDelete = latestResult.rows[0]
+
+      // Delete the resultado
+      const deleteQuery = `
+        DELETE FROM resultados_ensayos
+        WHERE id_resultado = $1
+      `
+      await client.query(deleteQuery, [resultadoToDelete.id_resultado])
+
+      await client.query('COMMIT')
+      return c.json({ success: true, message: 'Resultado deleted successfully' })
+
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+
+  } catch (error) {
+    console.error('Error deleting resultado:', error)
+    return c.json({ error: 'Failed to delete resultado' }, 500)
   }
 })
 
