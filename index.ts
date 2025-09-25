@@ -108,7 +108,54 @@ async function generateExcelTemplateReport(ids_mesas: number[]): Promise<Buffer>
   
   console.log(`📋 Created results map with ${resultsMap.size} entries`)
   console.log(`📋 Results data rows: ${resultsData.rows.length}`)
-  
+
+  // 3.5. Calculate dynamic heights for Altura hinca (id=2) based on Corte hinca (id=32)
+  const calculatedHeights = new Map()
+
+  // For each mesa and component, calculate dynamic height
+  for (const row of resultsData.rows) {
+    if (row.id_tipo_ensayo === 2 && row.resultado_numerico !== null) { // Altura hinca
+      const mesaId = row.id_mesa
+      const componentId = row.id_componente_plantilla_1
+      const alturaOriginal = parseFloat(row.resultado_numerico)
+
+      // Get all Corte hinca (id=32) values for this component
+      const cortes = resultsData.rows.filter(r =>
+        r.id_mesa === mesaId &&
+        r.id_componente_plantilla_1 === componentId &&
+        r.id_tipo_ensayo === 32 &&
+        r.resultado_numerico !== null
+      )
+
+      // Calculate total cuts
+      let totalCortes = 0
+      cortes.forEach(corte => {
+        totalCortes += parseFloat(corte.resultado_numerico)
+      })
+
+      // Calculate dynamic height: original - total cuts
+      const alturaCalculada = alturaOriginal - totalCortes
+      const key = `${mesaId}-${componentId}-2` // key for Altura hinca
+
+      // Update the results map with calculated height
+      resultsMap.set(key, {
+        numerico: alturaCalculada,
+        booleano: null,
+        texto: null
+      })
+
+      calculatedHeights.set(key, {
+        original: alturaOriginal,
+        totalCortes: totalCortes,
+        calculada: alturaCalculada
+      })
+
+      console.log(`📏 Mesa ${mesaId}, Component ${componentId}: Altura original=${alturaOriginal}, Total cortes=${totalCortes}, Altura calculada=${alturaCalculada}`)
+    }
+  }
+
+  console.log(`📏 Calculated ${calculatedHeights.size} dynamic heights`)
+
   // 4. Create combined Excel workbook
   const combinedWorkbook = new ExcelJS.Workbook()
   
