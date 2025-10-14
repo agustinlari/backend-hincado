@@ -505,6 +505,44 @@ async function validateKeycloakToken(token: string): Promise<any> {
   }
 }
 
+// ================================
+// EXPORT ENDPOINTS FOR POWER QUERY (must come before other endpoints)
+// ================================
+
+// Export inspecciones table
+app.get('/api/export/inspecciones', exportAuthMiddleware, async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM inspecciones 
+      ORDER BY fecha_inicio DESC
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting inspecciones:', error)
+    return c.json({ 
+      error: 'Failed to export inspecciones',
+      details: error.message 
+    }, 500)
+  }
+})
+
+// Export inspecciones table (alternative endpoint to avoid route conflicts)
+app.get('/api/export/inspecciones-data', exportAuthMiddleware, async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM inspecciones 
+      ORDER BY fecha_inicio DESC
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting inspecciones data:', error)
+    return c.json({ 
+      error: 'Failed to export inspecciones data',
+      details: error.message 
+    }, 500)
+  }
+})
+
 // In-memory store for PDF generation jobs
 const pdfJobs = new Map<string, {
   status: 'pending' | 'processing' | 'completed' | 'error',
@@ -1525,6 +1563,149 @@ app.get('/api/inspecciones/:id/report-data', authMiddleware, async (c) => {
 
 // Continue with other export endpoints
 
+// Export mesas table
+app.get('/api/export/mesas', exportAuthMiddleware, async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        m.*,
+        c.nombre_ct,
+        p.nombre_plantilla,
+        p.dimension_x,
+        p.dimension_y
+      FROM mesas m
+      LEFT JOIN cts c ON m.id_ct = c.id_ct
+      LEFT JOIN mesa_plantillas p ON m.id_plantilla = p.id_plantilla
+      ORDER BY m.id_mesa
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting mesas:', error)
+    return c.json({ error: 'Failed to export mesas' }, 500)
+  }
+})
+
+// Export resultados_ensayos table
+app.get('/api/export/resultados-ensayos', exportAuthMiddleware, async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        re.*,
+        te.nombre_ensayo,
+        te.descripcion as ensayo_descripcion,
+        te.unidad_medida,
+        te.grupo_ensayo,
+        te.tipo_resultado,
+        m.nombre_mesa,
+        m.id_ct,
+        c.nombre_ct,
+        pc1.descripcion_punto_montaje as componente_1_descripcion,
+        pc1.tipo_elemento as componente_1_tipo,
+        pc1.coord_x as componente_1_coord_x,
+        pc1.coord_y as componente_1_coord_y,
+        pc2.descripcion_punto_montaje as componente_2_descripcion,
+        pc2.tipo_elemento as componente_2_tipo,
+        pc2.coord_x as componente_2_coord_x,
+        pc2.coord_y as componente_2_coord_y
+      FROM resultados_ensayos re
+      LEFT JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+      LEFT JOIN mesas m ON re.id_mesa = m.id_mesa
+      LEFT JOIN cts c ON m.id_ct = c.id_ct
+      LEFT JOIN plantilla_componentes pc1 ON re.id_componente_plantilla_1 = pc1.id_componente
+      LEFT JOIN plantilla_componentes pc2 ON re.id_componente_plantilla_2 = pc2.id_componente
+      ORDER BY re.id_mesa, te.nombre_ensayo, re.fecha_medicion DESC
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting resultados_ensayos:', error)
+    return c.json({ error: 'Failed to export resultados_ensayos' }, 500)
+  }
+})
+
+// Export tipos_ensayo table
+app.get('/api/export/tipos-ensayo', exportAuthMiddleware, async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM tipos_ensayo ORDER BY grupo_ensayo, orden_prioridad, nombre_ensayo
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting tipos_ensayo:', error)
+    return c.json({ error: 'Failed to export tipos_ensayo' }, 500)
+  }
+})
+
+// Export reglas_resultados_ensayos table  
+app.get('/api/export/reglas-resultados-ensayos', exportAuthMiddleware, async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        r.*,
+        te.nombre_ensayo,
+        te.tipo_resultado
+      FROM reglas_resultados_ensayos r
+      LEFT JOIN tipos_ensayo te ON r.id_tipo_ensayo = te.id_tipo_ensayo
+      ORDER BY r.id_tipo_ensayo, r.prioridad
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting reglas_resultados_ensayos:', error)
+    return c.json({ error: 'Failed to export reglas_resultados_ensayos' }, 500)
+  }
+})
+
+// Export plantilla_componentes table
+app.get('/api/export/plantilla-componentes', exportAuthMiddleware, async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        pc.*,
+        p.nombre_plantilla
+      FROM plantilla_componentes pc
+      LEFT JOIN mesa_plantillas p ON pc.id_plantilla = p.id_plantilla
+      ORDER BY pc.id_plantilla, pc.orden_prioridad, pc.id_componente
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting plantilla_componentes:', error)
+    return c.json({ error: 'Failed to export plantilla_componentes' }, 500)
+  }
+})
+
+// Export specific inspection data (JSON format)
+app.get('/api/export/inspecciones/:id/resultados', exportAuthMiddleware, async (c) => {
+  try {
+    const inspectionId = c.req.param('id')
+    const result = await pool.query(`
+      SELECT 
+        re.*,
+        te.nombre_ensayo,
+        te.descripcion as ensayo_descripcion,
+        te.unidad_medida,
+        te.grupo_ensayo,
+        te.tipo_resultado,
+        m.nombre_mesa,
+        m.id_ct,
+        c.nombre_ct,
+        pc1.descripcion_punto_montaje as componente_1_descripcion,
+        pc1.tipo_elemento as componente_1_tipo,
+        pc1.coord_x as componente_1_coord_x,
+        pc1.coord_y as componente_1_coord_y
+      FROM resultados_ensayos re
+      LEFT JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+      LEFT JOIN mesas m ON re.id_mesa = m.id_mesa
+      LEFT JOIN cts c ON m.id_ct = c.id_ct
+      LEFT JOIN plantilla_componentes pc1 ON re.id_componente_plantilla_1 = pc1.id_componente
+      WHERE re.id_inspeccion = $1
+      ORDER BY re.id_mesa, te.nombre_ensayo, re.fecha_medicion DESC
+    `, [inspectionId])
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error exporting inspection results:', error)
+    return c.json({ error: 'Failed to export inspection results' }, 500)
+  }
+})
+
 // Helper function to get all report data
 async function generateReportData(inspectionId: string) {
   try {
@@ -1711,6 +1892,550 @@ async function generateReportData(inspectionId: string) {
     console.error('Error generating report data:', error)
     return null
   }
+}
+
+// Helper functions for result formatting
+function evaluateRule(rule: any, result: any): boolean {
+  const { tipo_condicion, valor_numerico_1, valor_numerico_2, valor_booleano, valor_texto } = rule;
+  
+  // Get result value and convert to correct type
+  let resultValue;
+  if (result.resultado_numerico !== null && result.resultado_numerico !== undefined) {
+    resultValue = parseFloat(result.resultado_numerico);
+  } else if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
+    resultValue = result.resultado_booleano;
+  } else if (result.resultado_texto !== null && result.resultado_texto !== undefined) {
+    resultValue = result.resultado_texto;
+  } else {
+    return false;
+  }
+  
+  const num1 = valor_numerico_1 !== null ? parseFloat(valor_numerico_1) : null;
+  const num2 = valor_numerico_2 !== null ? parseFloat(valor_numerico_2) : null;
+  
+  // Enhanced debug for boolean rule evaluation with explicit conversion
+  if (typeof resultValue === 'boolean') {
+    console.log(`[PDF-RULE] Evaluating boolean: result=${resultValue} ${tipo_condicion} rule_value=${valor_booleano}`);
+    
+    // Explicit comparison for debugging
+    let ruleMatch = false;
+    if (tipo_condicion === '=') {
+      ruleMatch = resultValue === valor_booleano;
+    } else if (tipo_condicion === '<>') {
+      ruleMatch = resultValue !== valor_booleano;
+    }
+    
+    console.log(`[PDF-RULE] Match result: ${ruleMatch} (${resultValue} ${tipo_condicion} ${valor_booleano})`);
+  }
+  
+  switch (tipo_condicion) {
+    case '=':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue === num1;
+      if (typeof resultValue === 'boolean') return resultValue === valor_booleano;
+      if (typeof resultValue === 'string') return resultValue === valor_texto;
+      break;
+    
+    case '<>':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue !== num1;
+      if (typeof resultValue === 'boolean') return resultValue !== valor_booleano;
+      if (typeof resultValue === 'string') return resultValue !== valor_texto;
+      break;
+    
+    case '>':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue > num1;
+      break;
+    
+    case '<':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue < num1;
+      break;
+    
+    case '>=':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue >= num1;
+      break;
+    
+    case '<=':
+      if (typeof resultValue === 'number' && num1 !== null) return resultValue <= num1;
+      break;
+    
+    case 'ENTRE':
+      if (typeof resultValue === 'number' && num1 !== null && num2 !== null) {
+        return resultValue >= num1 && resultValue <= num2;
+      }
+      break;
+    
+    case 'FUERA_DE':
+      if (typeof resultValue === 'number' && num1 !== null && num2 !== null) {
+        return resultValue < num1 || resultValue > num2;
+      }
+      break;
+  }
+  
+  return false;
+}
+
+function getCellBackgroundColor(component: any, tipoEnsayo: any, results: any[], colorRules: any[]): string | null {
+  const result = results.find(r => 
+    r.id_componente_plantilla_1 === component.id_componente && 
+    r.id_tipo_ensayo === tipoEnsayo.id_tipo_ensayo
+  );
+  
+  if (!result) {
+    return null;
+  }
+  
+  const applicableRules = colorRules.filter(rule => 
+    rule.id_tipo_ensayo === tipoEnsayo.id_tipo_ensayo
+  );
+  
+  applicableRules.sort((a, b) => a.prioridad - b.prioridad);
+  
+  // Enhanced debug for boolean color rules
+  if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
+    console.log(`[PDF-COLOR] Component ${component.id_componente}, Test ${tipoEnsayo.id_tipo_ensayo}: value=${result.resultado_booleano} (${typeof result.resultado_booleano}), rules=${applicableRules.length}`);
+    applicableRules.forEach((rule, index) => {
+      console.log(`  Rule ${index}: condition=${rule.tipo_condicion}, rule_bool=${rule.valor_booleano}, color=${rule.resaltado}`);
+    });
+  }
+  
+  for (const rule of applicableRules) {
+    const ruleMatches = evaluateRule(rule, result);
+    
+    if (ruleMatches) {
+      const colorHex = rule.resaltado.startsWith('#') ? rule.resaltado : `#${rule.resaltado}`;
+      console.log(`[PDF-COLOR] ✅ Rule matched for component ${component.id_componente}: ${colorHex}`);
+      return colorHex;
+    }
+  }
+  
+  return null;
+}
+
+function formatTestResult(component: any, tipoEnsayo: any, results: any[]): string {
+  const result = results.find(r => 
+    r.id_componente_plantilla_1 === component.id_componente && 
+    r.id_tipo_ensayo === tipoEnsayo.id_tipo_ensayo
+  );
+  
+  // Simplified debug - only log when no match found
+  if (!result) {
+    console.log(`[PDF-MATCH] No result for component ${component.id_componente}, test ${tipoEnsayo.id_tipo_ensayo}`);
+    return '-';
+  }
+  
+  let value = '';
+  if (result.resultado_numerico !== null && result.resultado_numerico !== undefined) {
+    value = `${result.resultado_numerico}${tipoEnsayo.unidad_medida ? ' ' + tipoEnsayo.unidad_medida : ''}`;
+  } else if (result.resultado_booleano !== null && result.resultado_booleano !== undefined) {
+    // Explicit boolean conversion and debug
+    let boolValue;
+    if (result.resultado_booleano === true || result.resultado_booleano === 'true' || result.resultado_booleano === 1) {
+      boolValue = true;
+    } else if (result.resultado_booleano === false || result.resultado_booleano === 'false' || result.resultado_booleano === 0) {
+      boolValue = false;
+    } else {
+      boolValue = Boolean(result.resultado_booleano);
+    }
+    
+    const icon = boolValue ? '✅' : '❌';
+    console.log(`[PDF-BOOL] Component ${component.id_componente}, Test ${tipoEnsayo.nombre_ensayo}: DB=${result.resultado_booleano}(${typeof result.resultado_booleano}) -> ${boolValue} -> ${icon}`);
+    value = icon;
+  } else if (result.resultado_texto) {
+    value = result.resultado_texto;
+  }
+  
+  if (result.comentario && result.comentario.trim()) {
+    value = `* ${value}`;
+  }
+  
+  return value;
+}
+
+// Helper function to generate HTML for PDF
+function generateReportHTML(reportData: any) {
+  const { inspection, mesas, tiposEnsayo, colorRules } = reportData
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>Informe Inspección #${inspection.id_inspeccion}</title>
+      <style>
+        ${getPDFStyles()}
+      </style>
+    </head>
+    <body>
+      <!-- Página 1: Información de la inspección -->
+      <div class="report-cover-page">
+        <div class="report-header-logo">
+          <h1>📋 INFORME DE INSPECCIÓN</h1>
+          <div class="report-subtitle">Sistema de Inspecciones de Hincado</div>
+        </div>
+        
+        <div class="inspection-summary">
+          <h2>Datos de la Inspección</h2>
+          <div class="summary-grid">
+            <div class="summary-item">
+              <span class="summary-label">ID Inspección:</span>
+              <span class="summary-value">#${inspection.id_inspeccion}</span>
+            </div>
+            <div class="summary-item">
+              <span class="summary-label">Fecha de Inicio:</span>
+              <span class="summary-value">${new Date(inspection.fecha_inicio).toLocaleString('es-ES')}</span>
+            </div>
+            ${inspection.fecha_fin ? `
+            <div class="summary-item">
+              <span class="summary-label">Fecha de Fin:</span>
+              <span class="summary-value">${new Date(inspection.fecha_fin).toLocaleString('es-ES')}</span>
+            </div>
+            ` : ''}
+            <div class="summary-item">
+              <span class="summary-label">Estado:</span>
+              <span class="summary-value">${inspection.estado}</span>
+            </div>
+            ${inspection.descripcion ? `
+            <div class="summary-item full-width">
+              <span class="summary-label">Descripción:</span>
+              <span class="summary-value">${inspection.descripcion}</span>
+            </div>
+            ` : ''}
+          </div>
+        </div>
+
+        <div class="mesas-summary">
+          <h2>Resumen de Mesas Inspeccionadas</h2>
+          <p><strong>Total de mesas:</strong> ${mesas.length}</p>
+          
+          <table class="summary-table">
+            <thead>
+              <tr>
+                <th>ID Mesa</th>
+                <th>Nombre</th>
+                <th>CT</th>
+                <th>Total Ensayos</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${mesas.map(mesa => `
+                <tr>
+                  <td>${mesa.id_mesa}</td>
+                  <td>${mesa.nombre_mesa}</td>
+                  <td>${mesa.nombre_ct || 'N/A'}</td>
+                  <td>${mesa.results?.length || 0}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="report-footer">
+          <p><strong>Informe generado:</strong> ${new Date(reportData.generated_at).toLocaleString('es-ES')}</p>
+          <p><strong>Sistema:</strong> Inspecciones Hincado v1.0</p>
+        </div>
+      </div>
+
+      <!-- Páginas siguientes: Una tabla por mesa -->
+      ${mesas.map((mesa, index) => `
+        <div class="mesa-report-page${index === mesas.length - 1 ? ' last-mesa' : ''}">
+          <div class="mesa-page-header">
+            <div>
+              <h2>Mesa: ${mesa.nombre_mesa} (ID: ${mesa.id_mesa})</h2>
+            </div>
+            <div class="mesa-details">
+              <span><strong>CT:</strong> ${mesa.nombre_ct || 'N/A'}</span>
+              <span><strong>Coordenadas:</strong> 
+                (${typeof mesa.coord_x === 'number' ? mesa.coord_x.toFixed(6) : mesa.coord_x || 'N/A'}, 
+                 ${typeof mesa.coord_y === 'number' ? mesa.coord_y.toFixed(6) : mesa.coord_y || 'N/A'})
+              </span>
+              <span><strong>Página:</strong> ${index + 2}/${mesas.length + 1}</span>
+            </div>
+          </div>
+
+          ${mesa.components && mesa.components.length > 0 && tiposEnsayo && tiposEnsayo.length > 0 ? `
+            <table class="mesa-results-table">
+              <thead>
+                <tr>
+                  <th class="component-header">Componente</th>
+                  <th class="coordinates-header">Coordenadas</th>
+                  ${tiposEnsayo.map(tipoEnsayo => `
+                    <th class="test-header">
+                      ${tipoEnsayo.nombre_ensayo}
+                      ${tipoEnsayo.unidad_medida ? `<br><small>(${tipoEnsayo.unidad_medida})</small>` : ''}
+                    </th>
+                  `).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${mesa.components.map(component => `
+                  <tr>
+                    <td class="component-cell">
+                      <span class="component-icon">
+                        ${component.tipo_elemento === 'PANEL' ? '🔆' : '🔧'}
+                      </span>
+                      ${component.descripcion_punto_montaje || `${component.tipo_elemento} ${component.id_componente}`}
+                    </td>
+                    <td class="coordinates-cell">
+                      (${Math.round(component.coord_x)}, ${Math.round(component.coord_y)})
+                    </td>
+                    ${tiposEnsayo.map(tipoEnsayo => {
+                      const bgColor = getCellBackgroundColor(component, tipoEnsayo, mesa.results, colorRules);
+                      const resultText = formatTestResult(component, tipoEnsayo, mesa.results);
+                      const styleAttr = bgColor ? ` style="background-color: ${bgColor} !important;"` : '';
+                      
+                      return `<td class="result-cell"${styleAttr}>${resultText}</td>`
+                    }).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          ` : `
+            <div class="no-results">
+              <p>No se encontraron datos para esta mesa.</p>
+              <p><small>Componentes: ${mesa.components?.length || 0}, Tipos ensayo: ${tiposEnsayo?.length || 0}</small></p>
+            </div>
+          `}
+
+        </div>
+      `).join('')}
+    </body>
+    </html>
+  `
+}
+
+// CSS styles for PDF
+function getPDFStyles() {
+  return `
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+      line-height: 1.4;
+      color: #333;
+    }
+    
+    .report-cover-page {
+      width: 100%;
+      min-height: 100vh;
+      page-break-after: always;
+      page-break-inside: avoid;
+      padding: 20mm;
+      margin: 0;
+      box-sizing: border-box;
+    }
+    
+    @page {
+      size: A4;
+      margin: 15mm;
+    }
+    
+    @page landscape {
+      size: A4 landscape;
+      margin: 15mm;
+    }
+    
+    .mesa-report-page {
+      width: 100%;
+      page-break-after: always;
+      padding: 10mm;
+      margin: 0;
+      box-sizing: border-box;
+      page: landscape;
+    }
+    
+    .mesa-report-page.last-mesa {
+      page-break-after: avoid !important;
+    }
+    
+    .report-header-logo {
+      text-align: center;
+      margin-bottom: 30px;
+      border-bottom: 2px solid #333;
+      padding-bottom: 20px;
+    }
+    
+    .report-header-logo h1 {
+      font-size: 28px;
+      font-weight: bold;
+      margin: 0;
+      color: #333;
+    }
+    
+    .report-subtitle {
+      font-size: 16px;
+      color: #666;
+      margin-top: 10px;
+    }
+    
+    .inspection-summary h2,
+    .mesas-summary h2 {
+      font-size: 20px;
+      margin-bottom: 15px;
+      color: #333;
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 5px;
+    }
+    
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 15px;
+      margin-bottom: 30px;
+    }
+    
+    .summary-item {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    
+    .summary-item.full-width {
+      grid-column: 1 / -1;
+    }
+    
+    .summary-label {
+      font-weight: bold;
+      color: #555;
+    }
+    
+    .summary-value {
+      color: #333;
+    }
+    
+    .summary-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 30px;
+    }
+    
+    .summary-table th,
+    .summary-table td {
+      border: 1px solid #ddd;
+      padding: 8px;
+      text-align: left;
+    }
+    
+    .summary-table th {
+      background-color: #f8f9fa;
+      font-weight: bold;
+    }
+    
+    .mesa-page-header {
+      margin-bottom: 15px;
+      border-bottom: 1px solid #ccc;
+      padding-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .mesa-page-header h2 {
+      font-size: 16px;
+      margin: 0;
+      color: #333;
+    }
+    
+    .mesa-details {
+      font-size: 11px;
+      color: #666;
+      display: flex;
+      gap: 15px;
+    }
+    
+    .mesa-results-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 9px;
+      margin-top: 5px;
+      table-layout: fixed;
+    }
+    
+    .mesa-results-table th,
+    .mesa-results-table td {
+      border: 1px solid #333;
+      padding: 2px 4px;
+      text-align: center;
+      word-wrap: break-word;
+      overflow: hidden;
+      max-width: 80px;
+    }
+    
+    .mesa-results-table th {
+      background-color: #f0f0f0;
+      font-weight: bold;
+      font-size: 7px;
+      line-height: 1.2;
+    }
+    
+    .mesa-results-table .component-header {
+      text-align: left !important;
+      width: 120px;
+      min-width: 120px;
+    }
+    
+    .mesa-results-table .component-cell {
+      text-align: left !important;
+      font-size: 8px;
+      width: 120px;
+      min-width: 120px;
+    }
+    
+    .mesa-results-table .coordinates-header {
+      width: 60px;
+      min-width: 60px;
+    }
+    
+    .mesa-results-table .coordinates-cell {
+      font-size: 7px;
+      color: #666;
+      width: 60px;
+      min-width: 60px;
+    }
+    
+    .mesa-results-table .test-header {
+      width: 45px;
+      min-width: 45px;
+      font-size: 7px;
+      line-height: 1.1;
+    }
+    
+    .mesa-results-table .result-cell {
+      font-size: 8px;
+      font-weight: normal;
+      width: 45px;
+      min-width: 45px;
+    }
+    
+    .component-icon {
+      margin-right: 4px;
+    }
+    
+    
+    .report-footer {
+      margin-top: 30px;
+      text-align: center;
+      font-size: 12px;
+      color: #666;
+    }
+    
+    .no-results {
+      text-align: center;
+      color: #666;
+      font-style: italic;
+      padding: 20px;
+    }
+    
+    .mesa-results-table tbody tr {
+      page-break-inside: auto;
+    }
+    
+    .mesa-results-table {
+      page-break-after: avoid;
+    }
+  `
 }
 
 // Start the server
