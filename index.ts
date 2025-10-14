@@ -1032,6 +1032,108 @@ app.get('/api/mesas', authMiddleware, async (c) => {
   }
 })
 
+// Get mesas with all tests OK (most recent tests have resaltado = 'E5FAE1')
+// IMPORTANT: This route must be BEFORE /api/mesas/:id to avoid conflict
+app.get('/api/mesas/ensayos-ok', authMiddleware, async (c) => {
+  try {
+    const query = `
+      WITH latest_results AS (
+        -- Get the most recent test result for each (mesa, component, test_type) combination
+        SELECT
+          re.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY re.id_mesa, re.id_componente_plantilla_1, re.id_tipo_ensayo
+            ORDER BY re.fecha_medicion DESC, re.id_resultado DESC
+          ) as rn
+        FROM resultados_ensayos re
+        WHERE re.id_componente_plantilla_1 IS NOT NULL
+      ),
+      evaluated_results AS (
+        -- Evaluate each result against its rules to get the resaltado color
+        SELECT
+          lr.id_mesa,
+          lr.id_componente_plantilla_1,
+          lr.id_tipo_ensayo,
+          lr.resultado_numerico,
+          lr.resultado_booleano,
+          lr.resultado_texto,
+          r.resaltado,
+          r.prioridad
+        FROM latest_results lr
+        INNER JOIN reglas_resultados_ensayos r ON lr.id_tipo_ensayo = r.id_tipo_ensayo
+        WHERE lr.rn = 1
+          AND (
+            -- Numeric conditions
+            (lr.resultado_numerico IS NOT NULL AND r.valor_numerico_1 IS NOT NULL AND (
+              (r.tipo_condicion = '=' AND lr.resultado_numerico = r.valor_numerico_1) OR
+              (r.tipo_condicion = '<>' AND lr.resultado_numerico <> r.valor_numerico_1) OR
+              (r.tipo_condicion = '>' AND lr.resultado_numerico > r.valor_numerico_1) OR
+              (r.tipo_condicion = '<' AND lr.resultado_numerico < r.valor_numerico_1) OR
+              (r.tipo_condicion = '>=' AND lr.resultado_numerico >= r.valor_numerico_1) OR
+              (r.tipo_condicion = '<=' AND lr.resultado_numerico <= r.valor_numerico_1) OR
+              (r.tipo_condicion = 'ENTRE' AND lr.resultado_numerico BETWEEN r.valor_numerico_1 AND r.valor_numerico_2) OR
+              (r.tipo_condicion = 'FUERA_DE' AND lr.resultado_numerico NOT BETWEEN r.valor_numerico_1 AND r.valor_numerico_2)
+            ))
+            OR
+            -- Boolean conditions
+            (lr.resultado_booleano IS NOT NULL AND r.valor_booleano IS NOT NULL AND (
+              (r.tipo_condicion = '=' AND lr.resultado_booleano = r.valor_booleano) OR
+              (r.tipo_condicion = '<>' AND lr.resultado_booleano <> r.valor_booleano)
+            ))
+            OR
+            -- Text conditions
+            (lr.resultado_texto IS NOT NULL AND r.valor_texto IS NOT NULL AND (
+              (r.tipo_condicion = '=' AND lr.resultado_texto = r.valor_texto) OR
+              (r.tipo_condicion = '<>' AND lr.resultado_texto <> r.valor_texto)
+            ))
+          )
+      ),
+      best_match_per_result AS (
+        -- If multiple rules match, select the one with highest priority
+        SELECT DISTINCT ON (id_mesa, id_componente_plantilla_1, id_tipo_ensayo)
+          *
+        FROM evaluated_results
+        ORDER BY id_mesa, id_componente_plantilla_1, id_tipo_ensayo, prioridad DESC
+      ),
+      mesa_test_counts AS (
+        -- Count total tests and OK tests per mesa
+        SELECT
+          id_mesa,
+          COUNT(*) as total_tests,
+          COUNT(CASE WHEN resaltado = 'E5FAE1' THEN 1 END) as ok_tests
+        FROM best_match_per_result
+        GROUP BY id_mesa
+      )
+      -- Return only mesas where ALL tests are OK
+      SELECT
+        m.id_mesa,
+        m.nombre_mesa,
+        m.coord_x,
+        m.coord_y,
+        mp.dimension_x,
+        mp.dimension_y,
+        ct.nombre_ct,
+        mp.nombre_plantilla,
+        mtc.total_tests,
+        mtc.ok_tests
+      FROM mesa_test_counts mtc
+      INNER JOIN mesas m ON mtc.id_mesa = m.id_mesa
+      LEFT JOIN cts ct ON m.id_ct = ct.id_ct
+      LEFT JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
+      WHERE mtc.total_tests > 0
+        AND mtc.total_tests = mtc.ok_tests
+      ORDER BY m.id_mesa
+    `
+
+    const result = await pool.query(query)
+    console.log(`✅ Found ${result.rows.length} mesas with all tests OK`)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching mesas with all tests OK:', error)
+    return c.json({ error: 'Failed to fetch mesas with all tests OK' }, 500)
+  }
+})
+
 // Get mesa details by ID
 app.get('/api/mesas/:id', authMiddleware, async (c) => {
   const id = c.req.param('id')
