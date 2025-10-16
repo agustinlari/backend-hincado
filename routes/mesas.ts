@@ -32,6 +32,7 @@ export function createMesasRouter(pool: Pool, authMiddleware: any) {
   })
 
   // Get mesas with all tests OK (most recent tests have resaltado = 'E5FAE1')
+  // AND all components have "Altura hinca" test (id_tipo_ensayo=2) with OK result
   // IMPORTANT: This route must be BEFORE /api/mesas/:id to avoid conflict
   router.get('/api/mesas/ensayos-ok', authMiddleware, async (c) => {
     try {
@@ -102,8 +103,29 @@ export function createMesasRouter(pool: Pool, authMiddleware: any) {
             COUNT(CASE WHEN resaltado = 'E5FAE1' THEN 1 END) as ok_tests
           FROM best_match_per_result
           GROUP BY id_mesa
+        ),
+        mesa_component_counts AS (
+          -- Count total components per mesa (from plantilla)
+          SELECT
+            m.id_mesa,
+            COUNT(DISTINCT pc.id_componente) as total_components
+          FROM mesas m
+          JOIN plantilla_componentes pc ON m.id_plantilla = pc.id_plantilla
+          GROUP BY m.id_mesa
+        ),
+        altura_hinca_component_counts AS (
+          -- Count components with "Altura hinca" (id_tipo_ensayo=2) test OK per mesa
+          SELECT
+            bmpr.id_mesa,
+            COUNT(DISTINCT bmpr.id_componente_plantilla_1) as components_with_altura_hinca_ok
+          FROM best_match_per_result bmpr
+          WHERE bmpr.id_tipo_ensayo = 2
+            AND bmpr.resaltado = 'E5FAE1'
+          GROUP BY bmpr.id_mesa
         )
-        -- Return only mesas where ALL tests are OK
+        -- Return only mesas where:
+        -- 1. ALL tests are OK
+        -- 2. ALL components have "Altura hinca" test with OK result
         SELECT
           m.id_mesa,
           m.nombre_mesa,
@@ -114,18 +136,23 @@ export function createMesasRouter(pool: Pool, authMiddleware: any) {
           ct.nombre_ct,
           mp.nombre_plantilla,
           mtc.total_tests,
-          mtc.ok_tests
+          mtc.ok_tests,
+          mcc.total_components,
+          COALESCE(ahcc.components_with_altura_hinca_ok, 0) as components_with_altura_hinca_ok
         FROM mesa_test_counts mtc
         INNER JOIN mesas m ON mtc.id_mesa = m.id_mesa
         LEFT JOIN cts ct ON m.id_ct = ct.id_ct
         LEFT JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
+        INNER JOIN mesa_component_counts mcc ON m.id_mesa = mcc.id_mesa
+        LEFT JOIN altura_hinca_component_counts ahcc ON m.id_mesa = ahcc.id_mesa
         WHERE mtc.total_tests > 0
-          AND mtc.total_tests = mtc.ok_tests
+          AND mtc.total_tests = mtc.ok_tests  -- All existing tests are OK
+          AND mcc.total_components = COALESCE(ahcc.components_with_altura_hinca_ok, 0)  -- All components have altura hinca OK
         ORDER BY m.id_mesa
       `
 
       const result = await pool.query(query)
-      console.log(`✅ Found ${result.rows.length} mesas with all tests OK`)
+      console.log(`✅ Found ${result.rows.length} mesas with all tests OK and all components with Altura hinca OK`)
       return c.json(result.rows)
     } catch (error) {
       console.error('Error fetching mesas with all tests OK:', error)
