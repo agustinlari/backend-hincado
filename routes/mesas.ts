@@ -31,6 +31,154 @@ export function createMesasRouter(pool: Pool, authMiddleware: any) {
     }
   })
 
+  // Get mesas "Terminado a falta de corte"
+  // All tests OK except id_tipo_ensayo=16 (Rechazo hinca), id_tipo_ensayo=2 (Altura hinca), and id_tipo_ensayo=17 (Corte y mecanizado)
+  // At least one component must have test type 16 as NO OK
+  // Types 2 and 17 are completely ignored
+  // IMPORTANT: This route must be BEFORE /api/mesas/:id to avoid conflict
+  router.get('/api/mesas/terminado-falta-corte', authMiddleware, async (c) => {
+    try {
+      const query = `
+        WITH latest_results AS (
+          -- Get the most recent test result for each (mesa, component, test_type) combination
+          SELECT
+            re.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY re.id_mesa, re.id_componente_plantilla_1, re.id_tipo_ensayo
+              ORDER BY re.fecha_medicion DESC, re.id_resultado DESC
+            ) as rn
+          FROM resultados_ensayos re
+          WHERE re.id_componente_plantilla_1 IS NOT NULL
+        ),
+        evaluated_results AS (
+          -- Evaluate each result against its rules to get the resaltado color
+          SELECT
+            lr.id_mesa,
+            lr.id_componente_plantilla_1,
+            lr.id_tipo_ensayo,
+            lr.resultado_numerico,
+            lr.resultado_booleano,
+            lr.resultado_texto,
+            r.resaltado,
+            r.prioridad
+          FROM latest_results lr
+          INNER JOIN reglas_resultados_ensayos r ON lr.id_tipo_ensayo = r.id_tipo_ensayo
+          WHERE lr.rn = 1
+            AND (
+              -- Numeric conditions
+              (lr.resultado_numerico IS NOT NULL AND r.valor_numerico_1 IS NOT NULL AND (
+                (r.tipo_condicion = '=' AND lr.resultado_numerico = r.valor_numerico_1) OR
+                (r.tipo_condicion = '<>' AND lr.resultado_numerico <> r.valor_numerico_1) OR
+                (r.tipo_condicion = '>' AND lr.resultado_numerico > r.valor_numerico_1) OR
+                (r.tipo_condicion = '<' AND lr.resultado_numerico < r.valor_numerico_1) OR
+                (r.tipo_condicion = '>=' AND lr.resultado_numerico >= r.valor_numerico_1) OR
+                (r.tipo_condicion = '<=' AND lr.resultado_numerico <= r.valor_numerico_1) OR
+                (r.tipo_condicion = 'ENTRE' AND lr.resultado_numerico BETWEEN r.valor_numerico_1 AND r.valor_numerico_2) OR
+                (r.tipo_condicion = 'FUERA_DE' AND lr.resultado_numerico NOT BETWEEN r.valor_numerico_1 AND r.valor_numerico_2)
+              ))
+              OR
+              -- Boolean conditions
+              (lr.resultado_booleano IS NOT NULL AND r.valor_booleano IS NOT NULL AND (
+                (r.tipo_condicion = '=' AND lr.resultado_booleano = r.valor_booleano) OR
+                (r.tipo_condicion = '<>' AND lr.resultado_booleano <> r.valor_booleano)
+              ))
+              OR
+              -- Text conditions
+              (lr.resultado_texto IS NOT NULL AND r.valor_texto IS NOT NULL AND (
+                (r.tipo_condicion = '=' AND lr.resultado_texto = r.valor_texto) OR
+                (r.tipo_condicion = '<>' AND lr.resultado_texto <> r.valor_texto)
+              ))
+            )
+        ),
+        best_match_per_result AS (
+          -- If multiple rules match, select the one with highest priority
+          SELECT DISTINCT ON (id_mesa, id_componente_plantilla_1, id_tipo_ensayo)
+            *
+          FROM evaluated_results
+          ORDER BY id_mesa, id_componente_plantilla_1, id_tipo_ensayo, prioridad DESC
+        ),
+        -- Count tests excluding type 16 (Rechazo hinca), type 2 (Altura hinca), and type 17 (Corte y mecanizado)
+        mesa_test_counts_no_tipo16 AS (
+          SELECT
+            id_mesa,
+            COUNT(*) as total_tests_no_tipo16,
+            COUNT(CASE WHEN resaltado = 'E5FAE1' THEN 1 END) as ok_tests_no_tipo16
+          FROM best_match_per_result
+          WHERE id_tipo_ensayo NOT IN (16, 2, 17)
+          GROUP BY id_mesa
+        ),
+        -- Count type 16 tests that are NO OK
+        mesa_tipo16_no_ok AS (
+          SELECT
+            id_mesa,
+            COUNT(CASE WHEN resaltado = 'FAE1E1' THEN 1 END) as tipo16_no_ok_count
+          FROM best_match_per_result
+          WHERE id_tipo_ensayo = 16
+          GROUP BY id_mesa
+        ),
+        mesa_component_counts AS (
+          -- Count total components per mesa (from plantilla)
+          SELECT
+            m.id_mesa,
+            COUNT(DISTINCT pc.id_componente) as total_components
+          FROM mesas m
+          JOIN plantilla_componentes pc ON m.id_plantilla = pc.id_plantilla
+          GROUP BY m.id_mesa
+        ),
+        pot_test_counts AS (
+          -- Count POT tests (id_tipo_ensayo=33) and OK POT tests per mesa
+          SELECT
+            bmpr.id_mesa,
+            COUNT(*) as total_pot_tests,
+            COUNT(CASE WHEN bmpr.resaltado = 'E5FAE1' THEN 1 END) as ok_pot_tests
+          FROM best_match_per_result bmpr
+          WHERE bmpr.id_tipo_ensayo = 33
+          GROUP BY bmpr.id_mesa
+        )
+        -- Return only mesas where:
+        -- 1. ALL tests (except type 16, type 2, and type 17) are OK
+        -- 2. If POT tests exist, ALL must be OK
+        -- 3. At least ONE test type 16 is NO OK
+        SELECT
+          m.id_mesa,
+          m.nombre_mesa,
+          m.coord_x,
+          m.coord_y,
+          mp.dimension_x,
+          mp.dimension_y,
+          ct.nombre_ct,
+          mp.nombre_plantilla,
+          mtc.total_tests_no_tipo16,
+          mtc.ok_tests_no_tipo16,
+          COALESCE(ptc.total_pot_tests, 0) as total_pot_tests,
+          COALESCE(ptc.ok_pot_tests, 0) as ok_pot_tests,
+          COALESCE(mt16.tipo16_no_ok_count, 0) as tipo16_no_ok_count
+        FROM mesa_test_counts_no_tipo16 mtc
+        INNER JOIN mesas m ON mtc.id_mesa = m.id_mesa
+        LEFT JOIN cts ct ON m.id_ct = ct.id_ct
+        LEFT JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
+        LEFT JOIN pot_test_counts ptc ON m.id_mesa = ptc.id_mesa
+        LEFT JOIN mesa_tipo16_no_ok mt16 ON m.id_mesa = mt16.id_mesa
+        WHERE mtc.total_tests_no_tipo16 > 0
+          AND mtc.total_tests_no_tipo16 = mtc.ok_tests_no_tipo16  -- All tests (except type 16, type 2, and type 17) are OK
+          AND (
+            -- POT tests are optional: if they exist, all must be OK
+            COALESCE(ptc.total_pot_tests, 0) = 0  -- No POT tests (OK)
+            OR ptc.total_pot_tests = ptc.ok_pot_tests  -- All POT tests are OK
+          )
+          AND COALESCE(mt16.tipo16_no_ok_count, 0) > 0  -- At least one type 16 test is NO OK
+        ORDER BY m.id_mesa
+      `
+
+      const result = await pool.query(query)
+      console.log(`✅ Found ${result.rows.length} mesas "Terminado a falta de corte"`)
+      return c.json(result.rows)
+    } catch (error) {
+      console.error('Error fetching mesas "Terminado a falta de corte":', error)
+      return c.json({ error: 'Failed to fetch mesas "Terminado a falta de corte"' }, 500)
+    }
+  })
+
   // Get mesas with all tests OK (most recent tests have resaltado = 'E5FAE1')
   // AND all components have "Altura hinca" test (id_tipo_ensayo=2) with OK result
   // AND if POT tests (id_tipo_ensayo=33) exist, all must be OK (POT tests are optional)
