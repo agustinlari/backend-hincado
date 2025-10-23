@@ -521,6 +521,52 @@ export function createEnsayosRouter(pool: Pool, authMiddleware: any) {
     }
   })
 
+  // Get historical test results for a specific component and test type
+  router.get('/api/resultados-ensayos/historial', authMiddleware, async (c) => {
+    try {
+      const id_mesa = c.req.query('id_mesa')
+      const id_componente = c.req.query('id_componente')
+      const id_tipo_ensayo = c.req.query('id_tipo_ensayo')
+      const limit = parseInt(c.req.query('limit') || '10')
+
+      if (!id_mesa || !id_componente || !id_tipo_ensayo) {
+        return c.json({
+          error: 'Missing required parameters: id_mesa, id_componente, id_tipo_ensayo'
+        }, 400)
+      }
+
+      const query = `
+        SELECT
+          re.id_resultado,
+          re.id_tipo_ensayo,
+          re.resultado_numerico,
+          re.resultado_booleano,
+          re.resultado_texto,
+          re.comentario,
+          re.fecha_medicion,
+          i.descripcion as inspeccion_descripcion,
+          i.id_usuario,
+          te.nombre_ensayo,
+          te.unidad_medida,
+          te.tipo_resultado
+        FROM resultados_ensayos re
+        INNER JOIN inspecciones i ON re.id_inspeccion = i.id_inspeccion
+        INNER JOIN tipos_ensayo te ON re.id_tipo_ensayo = te.id_tipo_ensayo
+        WHERE re.id_mesa = $1
+          AND re.id_componente_plantilla_1 = $2
+          AND re.id_tipo_ensayo = $3
+        ORDER BY re.fecha_medicion DESC, re.id_resultado DESC
+        LIMIT $4
+      `
+
+      const result = await pool.query(query, [id_mesa, id_componente, id_tipo_ensayo, limit])
+      return c.json(result.rows)
+    } catch (error) {
+      console.error('Error fetching test history:', error)
+      return c.json({ error: 'Failed to fetch test history' }, 500)
+    }
+  })
+
   // Delete the latest resultado for a specific mesa and tipo_ensayo
   router.delete('/api/resultados-ensayos', authMiddleware, async (c) => {
     try {
