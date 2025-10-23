@@ -16,7 +16,8 @@ export function createMesasRouter(pool: Pool, authMiddleware: any) {
           ct.nombre_ct,
           mp.nombre_plantilla,
           mp.dimension_x,
-          mp.dimension_y
+          mp.dimension_y,
+          EXISTS(SELECT 1 FROM resultados_ensayos re WHERE re.id_mesa = m.id_mesa) as tiene_ensayos
         FROM mesas m
         JOIN cts ct ON m.id_ct = ct.id_ct
         JOIN mesa_plantillas mp ON m.id_plantilla = mp.id_plantilla
