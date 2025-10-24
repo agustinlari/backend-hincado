@@ -83,7 +83,7 @@ export function createAuthRouter(jwtSecret: string) {
       console.log('🆔 Client ID:', clientId)
 
       // Obtener token de Keycloak usando URL interna
-      const tokenUrl = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/token`
+      const tokenUrl = `${keycloakUrl}/auth/realms/${realm}/protocol/openid-connect/token`
       const requestBody = new URLSearchParams({
         grant_type: 'password',
         client_id: clientId,
@@ -152,7 +152,7 @@ export function createAuthRouter(jwtSecret: string) {
       const redirectUri = `${c.req.url.split('/api')[0]}/api/auth/callback`
 
       // Exchange code for tokens
-      const tokenResponse = await fetch(`${keycloakUrl}/realms/${realm}/protocol/openid-connect/token`, {
+      const tokenResponse = await fetch(`${keycloakUrl}/auth/realms/${realm}/protocol/openid-connect/token`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded'
@@ -172,7 +172,7 @@ export function createAuthRouter(jwtSecret: string) {
       const tokens = await tokenResponse.json()
 
       // Get user info
-      const userInfoResponse = await fetch(`${keycloakUrl}/realms/${realm}/protocol/openid-connect/userinfo`, {
+      const userInfoResponse = await fetch(`${keycloakUrl}/auth/realms/${realm}/protocol/openid-connect/userinfo`, {
         headers: {
           'Authorization': `Bearer ${tokens.access_token}`
         }
