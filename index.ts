@@ -34,7 +34,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-producti
 app.use('/*', cors({
   origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:8789', 'https://aplicaciones.osmos.es:4444'],
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  allowHeaders: ['Content-Type', 'Authorization'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-Instalacion'],
 }))
 
 // Database connection
@@ -44,6 +44,89 @@ const pool = new Pool({
   database: process.env.DB_NAME || 'fvinspeccioneshincas',
   password: process.env.DB_PASSWORD || 'Osmos2017',
   port: parseInt(process.env.DB_PORT || '5432'),
+})
+
+// Configurar search_path por defecto para todas las conexiones del pool
+pool.on('connect', (client) => {
+  client.query('SET search_path TO cierzo_ii, public')
+  console.log('🔗 Nueva conexión configurada con search_path: cierzo_ii, public')
+})
+
+// Cache de instalaciones válidas (se actualiza cada 5 minutos)
+let instalacionesCache: { slug: string; esquema: string }[] = []
+let instalacionesCacheTime = 0
+const CACHE_DURATION = 5 * 60 * 1000 // 5 minutos
+
+async function getInstalacionesValidas() {
+  const now = Date.now()
+  if (now - instalacionesCacheTime > CACHE_DURATION) {
+    const result = await pool.query(
+      'SELECT slug, esquema FROM public.instalaciones WHERE activo = true'
+    )
+    instalacionesCache = result.rows
+    instalacionesCacheTime = now
+    console.log('🔄 Cache de instalaciones actualizado:', instalacionesCache.map(i => i.slug))
+  }
+  return instalacionesCache
+}
+
+// Helper para ejecutar queries con el esquema correcto
+async function queryWithSchema(esquema: string, text: string, params?: any[]) {
+  const client = await pool.connect()
+  try {
+    await client.query(`SET search_path TO ${esquema}, public`)
+    const result = await client.query(text, params)
+    return result
+  } finally {
+    client.release()
+  }
+}
+
+// Endpoint público para listar instalaciones (sin auth)
+app.get('/api/instalaciones', async (c) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, nombre, slug, descripcion, ubicacion, imagen_url, activo, created_at
+      FROM public.instalaciones
+      WHERE activo = true
+      ORDER BY nombre
+    `)
+    return c.json(result.rows)
+  } catch (error) {
+    console.error('Error fetching instalaciones:', error)
+    return c.json({ error: 'Failed to fetch instalaciones' }, 500)
+  }
+})
+
+// Middleware para validar y configurar el esquema de instalación
+app.use('/api/*', async (c, next) => {
+  // Excluir rutas que no necesitan esquema
+  const path = c.req.path
+  if (path === '/api/instalaciones' ||
+      path.startsWith('/api/auth/') ||
+      path === '/api/auth') {
+    return next()
+  }
+
+  const instalacionSlug = c.req.header('X-Instalacion')
+
+  if (!instalacionSlug) {
+    return c.json({ error: 'Header X-Instalacion es requerido' }, 400)
+  }
+
+  // Validar que la instalación existe
+  const instalaciones = await getInstalacionesValidas()
+  const instalacion = instalaciones.find(i => i.slug === instalacionSlug)
+
+  if (!instalacion) {
+    return c.json({ error: 'Instalación no válida' }, 400)
+  }
+
+  // Guardar el esquema en el contexto para uso posterior
+  c.set('esquema', instalacion.esquema)
+  c.set('instalacionSlug', instalacionSlug)
+
+  return next()
 })
 
 // Create middleware instances
