@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { Pool } from 'pg'
+import { Pool, PoolClient } from 'pg'
 import { serve } from '@hono/node-server'
 import { jwt, sign, verify } from 'hono/jwt'
 import * as jose from 'jose'
@@ -10,6 +10,10 @@ import ExcelJS from 'exceljs'
 import { PDFDocument } from 'pdf-lib'
 import * as fs from 'fs'
 import * as path from 'path'
+import { AsyncLocalStorage } from 'async_hooks'
+
+// AsyncLocalStorage para pasar el esquema de forma transparente a través del request
+const schemaStorage = new AsyncLocalStorage<string>()
 
 // Import routers
 import { createAuthRouter } from './routes/auth'
@@ -46,11 +50,47 @@ const pool = new Pool({
   port: parseInt(process.env.DB_PORT || '5432'),
 })
 
-// Configurar search_path por defecto para todas las conexiones del pool
-pool.on('connect', (client) => {
-  client.query('SET search_path TO cierzo_ii, public')
-  console.log('🔗 Nueva conexión configurada con search_path: cierzo_ii, public')
-})
+// Wrapper para pool.query que automáticamente establece el search_path correcto
+const originalPoolQuery = pool.query.bind(pool)
+
+// Override pool.query para usar el esquema del AsyncLocalStorage
+pool.query = async function(textOrConfig: any, values?: any): Promise<any> {
+  const esquema = schemaStorage.getStore()
+
+  // Log para debugging (solo la primera vez por request)
+  const queryPreview = typeof textOrConfig === 'string'
+    ? textOrConfig.substring(0, 50).replace(/\s+/g, ' ')
+    : 'config object'
+  console.log(`📊 Query con esquema: ${esquema || 'public'} - ${queryPreview}...`)
+
+  if (esquema) {
+    // Si hay un esquema en el contexto, usar una conexión dedicada con ese esquema
+    const client = await pool.connect()
+    try {
+      await client.query(`SET search_path TO ${esquema}, public`)
+      if (typeof textOrConfig === 'string') {
+        return await client.query(textOrConfig, values)
+      } else {
+        return await client.query(textOrConfig)
+      }
+    } finally {
+      client.release()
+    }
+  } else {
+    // Si no hay esquema (ej: endpoint de instalaciones), usar query normal con public
+    const client = await pool.connect()
+    try {
+      await client.query('SET search_path TO public')
+      if (typeof textOrConfig === 'string') {
+        return await client.query(textOrConfig, values)
+      } else {
+        return await client.query(textOrConfig)
+      }
+    } finally {
+      client.release()
+    }
+  }
+} as typeof pool.query
 
 // Cache de instalaciones válidas (se actualiza cada 5 minutos)
 let instalacionesCache: { slug: string; esquema: string }[] = []
@@ -70,16 +110,9 @@ async function getInstalacionesValidas() {
   return instalacionesCache
 }
 
-// Helper para ejecutar queries con el esquema correcto
-async function queryWithSchema(esquema: string, text: string, params?: any[]) {
-  const client = await pool.connect()
-  try {
-    await client.query(`SET search_path TO ${esquema}, public`)
-    const result = await client.query(text, params)
-    return result
-  } finally {
-    client.release()
-  }
+// Helper para obtener el esquema actual (para debugging)
+function getCurrentSchema(): string | undefined {
+  return schemaStorage.getStore()
 }
 
 // Endpoint público para listar instalaciones (sin auth)
@@ -126,7 +159,8 @@ app.use('/api/*', async (c, next) => {
   c.set('esquema', instalacion.esquema)
   c.set('instalacionSlug', instalacionSlug)
 
-  return next()
+  // Ejecutar el resto del request dentro del AsyncLocalStorage con el esquema correcto
+  return schemaStorage.run(instalacion.esquema, () => next())
 })
 
 // Create middleware instances
