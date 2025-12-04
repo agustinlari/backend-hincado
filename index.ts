@@ -1007,23 +1007,19 @@ async function generatePOTTemplateReport(ids_mesas: number[]): Promise<Buffer> {
               const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-26`)
               newCell.value = cellValue.replace('[v_lect_comparador_inf_T2]', result?.numerico || '')
             } else if (cellValue.includes('[v_comentario]')) {
-              // Concatenar comentarios de medidas verticales (v) con salto de línea
-              const vComments = []
-              const ids_tipos_v = [24, 25, 26] // tipos de ensayo verticales
-              ids_tipos_v.forEach(id_tipo => {
-                const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-${id_tipo}`)
-                if (result?.comentario) {
-                  vComments.push(result.comentario)
-                }
-              })
-              newCell.value = cellValue.replace('[v_comentario]', vComments.join('\n'))
+              // Leer comentario de tipo_ensayo=36 (Comentario POT Vertical)
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-36`)
+              newCell.value = cellValue.replace('[v_comentario]', result?.texto || '')
             } else if (cellValue.includes('[v_valido]')) {
-              // Campo calculado basado en T1 y T2 de este componente específico
-              const resultT1 = resultsMap.get(`${component.id_mesa}-${component.id_componente}-25`)
-              const resultT2 = resultsMap.get(`${component.id_mesa}-${component.id_componente}-26`)
-              const isValid = (resultT1?.numerico !== null && resultT1?.numerico !== undefined) && 
-                             (resultT2?.numerico !== null && resultT2?.numerico !== undefined)
-              newCell.value = cellValue.replace('[v_valido]', isValid ? '✓' : '✗')
+              // Leer validez de tipo_ensayo=34 (Validez POT vertical)
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-34`)
+              let validezTexto = ''
+              if (result?.booleano === true) {
+                validezTexto = 'Sí'
+              } else if (result?.booleano === false) {
+                validezTexto = 'No'
+              }
+              newCell.value = cellValue.replace('[v_valido]', validezTexto)
             } else if (cellValue.includes('[c_carga_aplicada]')) {
               const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-31`)
               newCell.value = cellValue.replace('[c_carga_aplicada]', result?.numerico || '')
@@ -1034,12 +1030,15 @@ async function generatePOTTemplateReport(ids_mesas: number[]): Promise<Buffer> {
               const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-26`)
               newCell.value = cellValue.replace('[c_lect_comparador_inf_T2]', result?.numerico || '')
             } else if (cellValue.includes('[c_valido]')) {
-              // Campo calculado basado en cortantes T1 y T2 de este componente específico
-              const resultT1 = resultsMap.get(`${component.id_mesa}-${component.id_componente}-29`)
-              const resultT2 = resultsMap.get(`${component.id_mesa}-${component.id_componente}-26`)
-              const isValid = (resultT1?.numerico !== null && resultT1?.numerico !== undefined) && 
-                             (resultT2?.numerico !== null && resultT2?.numerico !== undefined)
-              newCell.value = cellValue.replace('[c_valido]', isValid ? '✓' : '✗')
+              // Leer validez de tipo_ensayo=35 (Validez POT cortante)
+              const result = resultsMap.get(`${component.id_mesa}-${component.id_componente}-35`)
+              let validezTexto = ''
+              if (result?.booleano === true) {
+                validezTexto = 'Sí'
+              } else if (result?.booleano === false) {
+                validezTexto = 'No'
+              }
+              newCell.value = cellValue.replace('[c_valido]', validezTexto)
             } else if (cellValue.includes('[c_comentario]')) {
               // Concatenar comentarios de medidas cortantes (c) con salto de línea
               const cComments = []
