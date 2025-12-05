@@ -1829,6 +1829,323 @@ async function generateReportData(inspectionId: string) {
   }
 }
 
+// ============================================
+// HIGH-RESOLUTION MAP SCREENSHOT ENDPOINT
+// ============================================
+
+// Calculate pixel dimensions for bounds at a given zoom level
+function calculateViewportForBounds(bounds: any, zoom: number): { width: number; height: number } {
+  // At zoom level z, the world is 256 * 2^z pixels wide
+  const worldPixels = 256 * Math.pow(2, zoom);
+
+  // Calculate pixel coordinates for bounds
+  const latToY = (lat: number) => {
+    const sinLat = Math.sin(lat * Math.PI / 180);
+    return (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * worldPixels;
+  };
+
+  const lngToX = (lng: number) => {
+    return ((lng + 180) / 360) * worldPixels;
+  };
+
+  const x1 = lngToX(bounds._southWest.lng);
+  const x2 = lngToX(bounds._northEast.lng);
+  const y1 = latToY(bounds._northEast.lat); // Note: y is inverted
+  const y2 = latToY(bounds._southWest.lat);
+
+  const width = Math.abs(x2 - x1);
+  const height = Math.abs(y2 - y1);
+
+  // Add some padding
+  return {
+    width: Math.ceil(width * 1.05),
+    height: Math.ceil(height * 1.05)
+  };
+}
+
+// Generate HTML for Leaflet map capture
+function generateMapCaptureHTML(
+  bounds: any,
+  zoom: number,
+  mesaRectangles?: any[],
+  componentMarkers?: any[],
+  highlights?: any[]
+): string {
+  const center = {
+    lat: (bounds._southWest.lat + bounds._northEast.lat) / 2,
+    lng: (bounds._southWest.lng + bounds._northEast.lng) / 2
+  };
+
+  // Generate mesa rectangles JS
+  const mesaRectanglesJS = mesaRectangles && mesaRectangles.length > 0
+    ? `
+      const mesaRects = ${JSON.stringify(mesaRectangles)};
+      mesaRects.forEach(r => {
+        L.rectangle([
+          [r.bounds.south, r.bounds.west],
+          [r.bounds.north, r.bounds.east]
+        ], {
+          color: r.style.color || '#3b82f6',
+          fillColor: r.style.fillColor || '#93c5fd',
+          fillOpacity: r.style.fillOpacity || 0.4,
+          weight: r.style.weight || 2
+        }).addTo(map);
+      });
+    `
+    : '';
+
+  // Generate highlight rectangles JS
+  const highlightsJS = highlights && highlights.length > 0
+    ? `
+      const highlightRects = ${JSON.stringify(highlights)};
+      highlightRects.forEach(r => {
+        L.rectangle([
+          [r.bounds.south, r.bounds.west],
+          [r.bounds.north, r.bounds.east]
+        ], {
+          color: r.style.color || '#fbbf24',
+          fillColor: r.style.fillColor || '#fef3c7',
+          fillOpacity: r.style.fillOpacity || 0.6,
+          weight: r.style.weight || 3
+        }).addTo(map);
+      });
+    `
+    : '';
+
+  // Generate component markers JS
+  const componentMarkersJS = componentMarkers && componentMarkers.length > 0
+    ? `
+      const compMarkers = ${JSON.stringify(componentMarkers)};
+      compMarkers.forEach(m => {
+        L.circleMarker([m.lat, m.lng], {
+          radius: m.radius || 4,
+          fillColor: m.fillColor || '#3b82f6',
+          color: m.color || '#1e40af',
+          weight: 1,
+          opacity: 1,
+          fillOpacity: m.fillOpacity || 0.8
+        }).addTo(map);
+      });
+    `
+    : '';
+
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Map Capture</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; }
+    #map { width: 100%; height: 100%; }
+    .leaflet-control-attribution { display: none !important; }
+    .leaflet-control-zoom { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script>
+    const map = L.map('map', {
+      center: [${center.lat}, ${center.lng}],
+      zoom: ${zoom},
+      zoomControl: false,
+      attributionControl: false,
+      preferCanvas: true
+    });
+
+    // Use Google Satellite tiles (same as main app)
+    L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+      maxZoom: 22,
+      maxNativeZoom: 20
+    }).addTo(map);
+
+    // Fit to bounds with the specified zoom
+    const bounds = L.latLngBounds(
+      [${bounds._southWest.lat}, ${bounds._southWest.lng}],
+      [${bounds._northEast.lat}, ${bounds._northEast.lng}]
+    );
+    map.fitBounds(bounds, { padding: [10, 10], maxZoom: ${zoom} });
+
+    // Add highlight rectangles first (behind mesas)
+    ${highlightsJS}
+
+    // Add mesa rectangles
+    ${mesaRectanglesJS}
+
+    // Add component markers on top
+    ${componentMarkersJS}
+
+    // Signal when map is ready
+    let tilesLoaded = 0;
+    let tilesLoading = 0;
+    let checkInterval = null;
+
+    map.on('tileloadstart', () => {
+      tilesLoading++;
+      console.log('Tile loading: ' + tilesLoading);
+    });
+
+    map.on('tileload', () => {
+      tilesLoaded++;
+      console.log('Tile loaded: ' + tilesLoaded + '/' + tilesLoading);
+    });
+
+    map.on('tileerror', (e) => {
+      tilesLoaded++;
+      console.log('Tile error: ' + tilesLoaded + '/' + tilesLoading);
+    });
+
+    // Check periodically if all tiles are loaded
+    checkInterval = setInterval(() => {
+      console.log('Check: ' + tilesLoaded + '/' + tilesLoading);
+      if (tilesLoading > 0 && tilesLoaded >= tilesLoading) {
+        clearInterval(checkInterval);
+        setTimeout(() => {
+          window.mapReady = true;
+          console.log('MAP_READY');
+        }, 2000); // Extra delay for rendering
+      }
+    }, 500);
+
+    // Fallback timeout - mark ready after 20 seconds regardless
+    setTimeout(() => {
+      if (!window.mapReady) {
+        clearInterval(checkInterval);
+        window.mapReady = true;
+        console.log('MAP_READY_TIMEOUT: ' + tilesLoaded + '/' + tilesLoading);
+      }
+    }, 20000);
+  </script>
+</body>
+</html>
+  `;
+}
+
+// Screenshot endpoint
+app.post('/api/screenshot', exportAuthMiddleware, async (c) => {
+  const body = await c.req.json();
+  const { bounds: rawBounds, zoom = 20, mesaRectangles, componentMarkers, highlights } = body;
+
+  // Accept both formats: {north, south, east, west} or {_southWest, _northEast}
+  let bounds: { _southWest: { lat: number; lng: number }; _northEast: { lat: number; lng: number } };
+
+  if (rawBounds && rawBounds.north !== undefined && rawBounds.south !== undefined) {
+    // Convert from {north, south, east, west} format
+    bounds = {
+      _southWest: { lat: rawBounds.south, lng: rawBounds.west },
+      _northEast: { lat: rawBounds.north, lng: rawBounds.east }
+    };
+  } else if (rawBounds && rawBounds._southWest && rawBounds._northEast) {
+    bounds = rawBounds;
+  } else {
+    return c.json({ error: 'Invalid bounds format. Expected {north, south, east, west} or {_southWest, _northEast}' }, 400);
+  }
+
+  // Calculate viewport size based on bounds and zoom
+  const calculatedViewport = calculateViewportForBounds(bounds, zoom);
+
+  // Limit dimensions to prevent abuse (min 800, max 8000)
+  const maxDimension = 8000;
+  const minDimension = 800;
+  const safeWidth = Math.min(Math.max(calculatedViewport.width, minDimension), maxDimension);
+  const safeHeight = Math.min(Math.max(calculatedViewport.height, minDimension), maxDimension);
+
+  console.log(`📷 Starting screenshot generation: ${safeWidth}x${safeHeight}, zoom: ${zoom}`);
+  console.log(`📍 Bounds: SW(${bounds._southWest.lat}, ${bounds._southWest.lng}) NE(${bounds._northEast.lat}, ${bounds._northEast.lng})`);
+  console.log(`📊 Markers: ${mesaRectangles?.length || 0} mesas, ${componentMarkers?.length || 0} components, ${highlights?.length || 0} highlights`);
+
+  let browser = null;
+
+  try {
+    // Generate HTML for the map with all markers
+    const htmlContent = generateMapCaptureHTML(bounds, zoom, mesaRectangles, componentMarkers, highlights);
+
+    // Launch Puppeteer with large viewport
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-web-security',
+        '--no-first-run',
+        '--no-zygote',
+        `--window-size=${safeWidth},${safeHeight}`
+      ]
+    });
+
+    const page = await browser.newPage();
+
+    // Listen to console messages from the page
+    page.on('console', msg => {
+      console.log(`📄 Page console: ${msg.text()}`);
+    });
+
+    // Set viewport to requested size
+    await page.setViewport({
+      width: safeWidth,
+      height: safeHeight,
+      deviceScaleFactor: 1
+    });
+
+    // Set content - use domcontentloaded to avoid waiting for all tiles
+    await page.setContent(htmlContent, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
+
+    console.log(`📷 Waiting for map tiles to load...`);
+
+    // Wait for map to be ready (our custom flag set when tiles load)
+    await page.waitForFunction('window.mapReady === true', { timeout: 60000 });
+
+    // Additional delay for final tile rendering
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    console.log(`📷 Taking screenshot...`);
+
+    // Take screenshot
+    const screenshot = await page.screenshot({
+      type: 'png',
+      fullPage: false
+    });
+
+    await browser.close();
+    browser = null;
+
+    console.log(`✅ Screenshot generated successfully: ${screenshot.length} bytes`);
+
+    // Return image
+    return new Response(screenshot, {
+      headers: {
+        'Content-Type': 'image/png',
+        'Content-Disposition': `attachment; filename="captura_${new Date().toISOString().split('T')[0]}.png"`
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error generating screenshot:', error);
+
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (e) {
+        console.error('Error closing browser:', e);
+      }
+    }
+
+    return c.json({
+      error: 'Error generating screenshot',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
 // Start the server
 const port = process.env.PORT ? parseInt(process.env.PORT) : 8787
 
